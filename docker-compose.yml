@@ -1,0 +1,22 @@
+version: '2'
+
+services:
+  filler:
+    build: .
+    image: filler-bot
+    expose:
+      - "9464"
+      - "3040"
+    restart: unless-stopped
+    command: sh -c "yarn run dev:filler --websocket"
+    environment:
+      - KEEPER_PRIVATE_KEY=./ids/.id.json
+      - ENDPOINT=http://165.140.86.78:8899
+      - METRICS_PORT=3040
+      - SUB_CLIENT_ID=0
+    volumes:
+      - ./ids:/app/ids
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
