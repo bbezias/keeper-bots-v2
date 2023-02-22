@@ -350,8 +350,6 @@ const runBot = async () => {
 			type: 'retry',
 			timeout: 5000,
 		},
-		activeSubAccountId: config.global.subaccounts[0],
-		subAccountIds: config.global.subaccounts,
 	});
 
 	const eventSubscriber = new EventSubscriber(connection, driftClient.program, {
