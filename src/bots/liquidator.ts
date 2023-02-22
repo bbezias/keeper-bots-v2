@@ -28,6 +28,8 @@ import {
 	WrappedEvent,
 	PositionDirection,
 	BulkAccountLoader,
+	PerpMarkets,
+	SpotMarkets,
 } from '@drift-labs/sdk';
 import { E_ALREADY_LOCKED, Mutex, tryAcquire } from 'async-mutex';
 
@@ -50,12 +52,15 @@ import { Bot } from '../types';
 import { RuntimeSpec, metricAttrFromUserAccount } from '../metrics';
 import { webhookMessage } from '../webhook';
 import { getErrorCode } from '../error';
+import { LiquidatorConfig } from '../config';
 
 const USER_MAP_RESYNC_COOLDOWN_SLOTS = 50;
 
 const errorCodesToSuppress = [
 	6004, // Error Number: 6004. Error Message: Sufficient collateral.
 ];
+
+const LIQUIDATE_THROTTLE_BACKOFF = 20000; // the time to wait before trying to liquidate a throttled user again
 
 function calculateSpotTokenAmountToLiquidate(
 	driftClient: DriftClient,
@@ -161,7 +166,9 @@ async function liqPerpPnl(
 	depositMarketIndextoLiq: number,
 	depositAmountToLiq: BN,
 	borrowMarketIndextoLiq: number,
-	borrowAmountToLiq: BN
+	borrowAmountToLiq: BN,
+	perpMarketIndicies: number[],
+	spotMarketIndicies: number[]
 ) {
 	if (liquidateePosition.quoteAssetAmount.gt(ZERO)) {
 		const claimablePnl = calculateClaimablePnl(
@@ -182,6 +189,12 @@ async function liqPerpPnl(
 		}
 
 		if (frac.lt(new BN(100000000))) {
+			if (!spotMarketIndicies.includes(borrowMarketIndextoLiq)) {
+				logger.info(
+					`skipping liquidateBorrowForPerpPnl of ${user.userAccountPublicKey.toBase58()} on market ${borrowMarketIndextoLiq} because it is not in spotMarketIndices`
+				);
+				return;
+			}
 			const start = Date.now();
 			driftClient
 				.liquidateBorrowForPerpPnl(
@@ -223,6 +236,11 @@ async function liqPerpPnl(
 								e.stack ? e.stack : e.message
 							}`
 						);
+					} else {
+						this.throttledUsers.set(
+							user.userAccountPublicKey.toBase58(),
+							Date.now()
+						);
 					}
 				})
 				.finally(() => {
@@ -238,6 +256,15 @@ async function liqPerpPnl(
 		}
 	} else {
 		const start = Date.now();
+
+		if (!perpMarketIndicies.includes(liquidateePosition.marketIndex)) {
+			logger.info(
+				`skipping liquidatePerpPnlForDeposit of ${user.userAccountPublicKey.toBase58()} on market ${
+					liquidateePosition.marketIndex
+				} because it is not in perpMarketIndices`
+			);
+			return;
+		}
 		driftClient
 			.liquidatePerpPnlForDeposit(
 				user.userAccountPublicKey,
@@ -273,6 +300,11 @@ async function liqPerpPnl(
 						}:\n${e.logs ? (e.logs as Array<string>).join('\n') : ''}\n${
 							e.stack ? e.stack : e.message
 						}`
+					);
+				} else {
+					this.throttledUsers.set(
+						user.userAccountPublicKey.toBase58(),
+						Date.now()
 					);
 				}
 			})
@@ -319,6 +351,8 @@ export class LiquidatorBot implements Bot {
 	private meter: Meter;
 	private exporter: PrometheusExporter;
 	private bootTimeMs: number;
+	private throttledUsers = new Map<string, number>();
+	private disableAutoDerisking: boolean;
 
 	// metrics
 	private runtimeSpecsGauge: ObservableGauge;
@@ -337,6 +371,8 @@ export class LiquidatorBot implements Bot {
 
 	private bulkAccountLoader: BulkAccountLoader | undefined;
 	private driftClient: DriftClient;
+	private perpMarketIndicies: number[];
+	private spotMarketIndicies: number[];
 	private intervalIds: Array<NodeJS.Timer> = [];
 	private userMapMutex = new Mutex();
 	private userMap: UserMap;
@@ -362,15 +398,13 @@ export class LiquidatorBot implements Bot {
 	private lastSlotResyncUserMaps = 0;
 
 	constructor(
-		name: string,
-		dryRun: boolean,
 		bulkAccountLoader: BulkAccountLoader | undefined,
 		driftClient: DriftClient,
 		runtimeSpec: RuntimeSpec,
-		metricsPort?: number | undefined
+		config: LiquidatorConfig
 	) {
-		this.name = name;
-		this.dryRun = dryRun;
+		this.name = config.botId;
+		this.dryRun = config.dryRun;
 		this.bulkAccountLoader = bulkAccountLoader;
 		this.driftClient = driftClient;
 		this.runtimeSpecs = runtimeSpec;
@@ -379,10 +413,35 @@ export class LiquidatorBot implements Bot {
 		);
 		this.bootTimeMs = Date.now();
 
-		this.metricsPort = metricsPort;
+		this.metricsPort = config.metricsPort;
 		if (this.metricsPort) {
 			this.initializeMetrics();
 		}
+
+		if (!config.disableAutoDerisking) {
+			this.disableAutoDerisking = false;
+		} else {
+			this.disableAutoDerisking = config.disableAutoDerisking;
+		}
+		logger.info(
+			`${this.name} disableAutoDerisking: ${this.disableAutoDerisking}`
+		);
+
+		this.perpMarketIndicies = config.perpMarketIndicies;
+		if (!this.perpMarketIndicies || this.perpMarketIndicies.length === 0) {
+			this.perpMarketIndicies = PerpMarkets[
+				this.runtimeSpecs.driftEnv as DriftEnv
+			].map((m) => m.marketIndex);
+		}
+		logger.info(`${this.name} perpMarketIndicies: ${this.perpMarketIndicies}`);
+
+		this.spotMarketIndicies = config.spotMarketIndicies;
+		if (!this.spotMarketIndicies || this.spotMarketIndicies.length === 0) {
+			this.spotMarketIndicies = SpotMarkets[
+				this.runtimeSpecs.driftEnv as DriftEnv
+			].map((m) => m.marketIndex);
+		}
+		logger.info(`${this.name} spotMarketIndicies: ${this.spotMarketIndicies}`);
 	}
 
 	public async init() {
@@ -496,8 +555,10 @@ export class LiquidatorBot implements Bot {
 		const intervalId = setInterval(this.tryLiquidate.bind(this), intervalMs);
 		this.intervalIds.push(intervalId);
 
-		const deRiskIntervalId = setInterval(this.derisk.bind(this), 10000);
-		this.intervalIds.push(deRiskIntervalId);
+		if (!this.disableAutoDerisking) {
+			const deRiskIntervalId = setInterval(this.derisk.bind(this), 10000);
+			this.intervalIds.push(deRiskIntervalId);
+		}
 
 		logger.info(`${this.name} Bot started!`);
 
@@ -757,10 +818,10 @@ export class LiquidatorBot implements Bot {
 							);
 						})
 						.catch((e) => {
-							logger.error(e);
 							logger.error(
 								`Error trying to close spot position for market ${position.marketIndex}`
 							);
+							console.error(e);
 							webhookMessage(
 								`[${
 									this.name
@@ -977,6 +1038,21 @@ export class LiquidatorBot implements Bot {
 					if (isVariant(userAcc.status, 'bankrupt')) {
 						await this.tryResolveBankruptUser(user);
 					} else if (user.canBeLiquidated()) {
+						if (this.throttledUsers.has(userKey)) {
+							const lastAttempt = this.throttledUsers.get(userKey);
+							const now = Date.now();
+							if (lastAttempt + LIQUIDATE_THROTTLE_BACKOFF > now) {
+								logger.warn(
+									`skipping user (throttled, retry in ${
+										lastAttempt + LIQUIDATE_THROTTLE_BACKOFF - now
+									}ms) ${auth}: ${userKey}`
+								);
+								continue;
+							} else {
+								this.throttledUsers.delete(userKey);
+							}
+						}
+
 						logger.info(
 							`liquidating auth: ${auth}, userAccount: ${userKey}...`
 						);
@@ -1009,6 +1085,12 @@ export class LiquidatorBot implements Bot {
 							);
 
 						if (borrowMarketIndextoLiq != -1 && depositMarketIndextoLiq != -1) {
+							if (!this.spotMarketIndicies.includes(borrowMarketIndextoLiq)) {
+								logger.info(
+									`Skipping liquidateSpot call for ${user.userAccountPublicKey.toBase58()} because borrowMarketIndextoLiq (${borrowMarketIndextoLiq}) is not in spotMarketIndicies`
+								);
+								continue;
+							}
 							const start = Date.now();
 							this.driftClient
 								.liquidateSpot(
@@ -1040,6 +1122,7 @@ export class LiquidatorBot implements Bot {
 									);
 									logger.error(e);
 									const errorCode = getErrorCode(e);
+
 									if (!errorCodesToSuppress.includes(errorCode)) {
 										webhookMessage(
 											`[${
@@ -1047,6 +1130,11 @@ export class LiquidatorBot implements Bot {
 											}]: :x: Error in liquidateSpot for userAccount ${user.userAccountPublicKey.toBase58()} on market ${depositMarketIndextoLiq} for borrow index: ${borrowMarketIndextoLiq}:\n${
 												e.logs ? (e.logs as Array<string>).join('\n') : ''
 											}\n${e.stack ? e.stack : e.message}`
+										);
+									} else {
+										this.throttledUsers.set(
+											user.userAccountPublicKey.toBase58(),
+											Date.now()
 										);
 									}
 								})
@@ -1078,7 +1166,9 @@ export class LiquidatorBot implements Bot {
 										depositMarketIndextoLiq,
 										depositAmountToLiq,
 										borrowMarketIndextoLiq,
-										borrowAmountToLiq
+										borrowAmountToLiq,
+										this.perpMarketIndicies,
+										this.spotMarketIndicies
 									);
 
 									break; // todo: exit loop to reload accounts etc?
@@ -1096,7 +1186,22 @@ export class LiquidatorBot implements Bot {
 									logger.warn(
 										'--dry run flag enabled - not sending liquidate tx'
 									);
+									continue;
 								}
+
+								if (
+									!this.perpMarketIndicies.includes(
+										liquidateePosition.marketIndex
+									)
+								) {
+									logger.info(
+										`Skipping liquidateSpot call for ${user.userAccountPublicKey.toBase58()} because marketIndex (${
+											liquidateePosition.marketIndex
+										}) is not in perpMarketIndicies`
+									);
+									continue;
+								}
+
 								const start = Date.now();
 								this.driftClient
 									.liquidatePerp(
@@ -1127,7 +1232,7 @@ export class LiquidatorBot implements Bot {
 												liquidateePosition.marketIndex
 											}\n${
 												e.logs ? (e.logs as Array<string>).join('\n') : ''
-											}\n${e.stack || e}}`
+											}\n${e.stack || e}`
 										);
 									})
 									.finally(() => {
@@ -1154,9 +1259,11 @@ export class LiquidatorBot implements Bot {
 				}
 			});
 
-			const startDerisk = Date.now();
-			await this.derisk();
-			logger.debug(`derisk took ${Date.now() - startDerisk}ms`);
+			if (!this.disableAutoDerisking) {
+				const startDerisk = Date.now();
+				await this.derisk();
+				logger.debug(`derisk took ${Date.now() - startDerisk}ms`);
+			}
 			ran = true;
 		} catch (e) {
 			if (e === E_ALREADY_LOCKED) {

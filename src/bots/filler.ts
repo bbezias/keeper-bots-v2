@@ -38,6 +38,8 @@ import {
 	TransactionSignature,
 	TransactionInstruction,
 	ComputeBudgetProgram,
+	GetVersionedTransactionConfig,
+	AddressLookupTableAccount,
 } from '@solana/web3.js';
 
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
@@ -57,6 +59,7 @@ import {
 
 import { logger } from '../logger';
 import { Bot } from '../types';
+import { FillerConfig } from '../config';
 import { RuntimeSpec, metricAttrFromUserAccount } from '../metrics';
 import { webhookMessage } from '../webhook';
 import {
@@ -71,6 +74,7 @@ import {
 	isOrderDoesNotExistLog,
 	isTakerBreachedMaintenanceMarginLog,
 } from './common/txLogParse';
+import { getErrorCode } from '../error';
 
 const MAX_TX_PACK_SIZE = 900; //1232;
 const CU_PER_FILL = 200_000; // CU cost for a successful fill
@@ -81,6 +85,10 @@ const FILL_ORDER_THROTTLE_BACKOFF = 10000; // the time to wait before trying to 
 const FILL_ORDER_COOLDOWN_BACKOFF = 2000; // the time to wait before trying to a node in the filling map again
 const USER_MAP_RESYNC_COOLDOWN_SLOTS = 50;
 const dlobMutexError = new Error('dlobMutex timeout');
+
+const errorCodesToSuppress = [
+	6081, // 0x17c1 Error Number: 6081. Error Message: MarketWrongMutability.
+];
 
 enum METRIC_TYPES {
 	sdk_call_duration_histogram = 'sdk_call_duration_histogram',
@@ -107,6 +115,8 @@ export class FillerBot implements Bot {
 	private bulkAccountLoader: BulkAccountLoader | undefined;
 	private driftClient: DriftClient;
 	private pollingIntervalMs: number;
+	private transactionVersion: number | undefined;
+	private lookupTableAccount: AddressLookupTableAccount;
 
 	private dlobMutex = withTimeout(
 		new Mutex(),
@@ -156,30 +166,30 @@ export class FillerBot implements Bot {
 	private userStatsMapAuthorityKeysGauge: ObservableGauge;
 
 	constructor(
-		name: string,
-		dryRun: boolean,
 		slotSubscriber: SlotSubscriber,
 		bulkAccountLoader: BulkAccountLoader | undefined,
 		driftClient: DriftClient,
 		runtimeSpec: RuntimeSpec,
-		pollingIntervalMs?: number,
-		metricsPort?: number
+		config: FillerConfig
 	) {
-		this.name = name;
-		this.dryRun = dryRun;
+		this.name = config.botId;
+		this.dryRun = config.dryRun;
 		this.slotSubscriber = slotSubscriber;
 		this.bulkAccountLoader = bulkAccountLoader;
 		this.driftClient = driftClient;
 		this.runtimeSpec = runtimeSpec;
-		if (!pollingIntervalMs) {
-			pollingIntervalMs = this.defaultIntervalMs;
-		}
-		this.pollingIntervalMs = pollingIntervalMs;
+		this.pollingIntervalMs =
+			config.fillerPollingInterval ?? this.defaultIntervalMs;
 
-		this.metricsPort = metricsPort;
+		this.metricsPort = config.metricsPort;
 		if (this.metricsPort) {
 			this.initializeMetrics();
 		}
+
+		this.transactionVersion = config.transactionVersion ?? undefined;
+		logger.info(
+			`${this.name}: using transactionVersion: ${this.transactionVersion}`
+		);
 	}
 
 	private initializeMetrics() {
@@ -371,6 +381,9 @@ export class FillerBot implements Bot {
 			await this.userMap.fetchAllUsers();
 			await this.userStatsMap.fetchAllUserStats();
 		});
+
+		this.lookupTableAccount =
+			await this.driftClient.fetchMarketLookupTableAccount();
 
 		await webhookMessage(`[${this.name}]: started`);
 	}
@@ -1109,11 +1122,13 @@ export class FillerBot implements Bot {
 	): Promise<number> {
 		let tx: TransactionResponse | null = null;
 		let attempts = 0;
+		const config: GetVersionedTransactionConfig = {
+			commitment: 'confirmed',
+			maxSupportedTransactionVersion: 0,
+		};
 		while (tx === null && attempts < 10) {
 			logger.info(`waiting for ${txSig} to be confirmed`);
-			tx = await this.driftClient.connection.getTransaction(txSig, {
-				commitment: 'confirmed',
-			});
+			tx = await this.driftClient.connection.getTransaction(txSig, config);
 			attempts++;
 			await this.sleep(1000);
 		}
@@ -1135,7 +1150,7 @@ export class FillerBot implements Bot {
 	private async tryBulkFillPerpNodes(
 		nodesToFill: Array<NodeToFill>
 	): Promise<[TransactionSignature, number]> {
-		const tx = new Transaction();
+		const ixs: Array<TransactionInstruction> = [];
 		let txSig = '';
 
 		/**
@@ -1164,7 +1179,7 @@ export class FillerBot implements Bot {
 			uniqueAccounts.add(key.pubkey.toString())
 		);
 		uniqueAccounts.add(computeBudgetIx.programId.toString());
-		tx.add(computeBudgetIx);
+		ixs.push(computeBudgetIx);
 
 		// initialize the barebones transaction
 		// signatures
@@ -1296,7 +1311,7 @@ export class FillerBot implements Bot {
 					.getUserAccountPublicKey()
 					.toString()}-${nodeToFill.node.order.orderId.toString()}`
 			);
-			tx.add(ix);
+			ixs.push(ix);
 			runningTxSize += newIxCost + additionalAccountsCost;
 			runningCUUsed += cuToUsePerFill;
 			newAccounts.forEach((key) => uniqueAccounts.add(key.toString()));
@@ -1318,9 +1333,27 @@ export class FillerBot implements Bot {
 			}ms`
 		);
 
+		let txResp: Promise<TxSigAndSlot>;
 		const txStart = Date.now();
-		this.driftClient.txSender
-			.send(tx, [], this.driftClient.opts)
+		if (isNaN(this.transactionVersion)) {
+			const tx = new Transaction();
+			for (const ix of ixs) {
+				tx.add(ix);
+			}
+			txResp = this.driftClient.txSender.send(tx, [], this.driftClient.opts);
+		} else if (this.transactionVersion === 0) {
+			txResp = this.driftClient.txSender.sendVersionedTransaction(
+				ixs,
+				[this.lookupTableAccount],
+				[],
+				this.driftClient.opts
+			);
+		} else {
+			throw new Error(
+				`unsupported transaction version ${this.transactionVersion}`
+			);
+		}
+		txResp
 			.then((resp: TxSigAndSlot) => {
 				txSig = resp.txSig;
 				const duration = Date.now() - txStart;
@@ -1367,18 +1400,27 @@ export class FillerBot implements Bot {
 				console.error(e);
 				logger.error(`Failed to send packed tx (error above):`);
 				const simError = e as SendTransactionError;
+
 				if (simError.logs && simError.logs.length > 0) {
-					this.txSimErrorCounter.add(1);
 					const start = Date.now();
 					await this.handleTransactionLogs(nodesSent, simError.logs);
 					logger.error(
 						`Failed to send tx, sim error tx logs took: ${Date.now() - start}ms`
 					);
-					webhookMessage(
-						`[${this.name}]: :x: error simulating tx:\n${
-							simError.logs ? simError.logs.join('\n') : ''
-						}\n${e.stack || e}`
-					);
+
+					const errorCode = getErrorCode(e);
+
+					if (
+						!errorCodesToSuppress.includes(errorCode) &&
+						!(e as Error).message.includes('Transaction was not confirmed')
+					) {
+						this.txSimErrorCounter.add(1, { errorCode: errorCode.toString() });
+						webhookMessage(
+							`[${this.name}]: :x: error simulating tx:\n${
+								simError.logs ? simError.logs.join('\n') : ''
+							}\n${e.stack || e}`
+						);
+					}
 				}
 			})
 			.finally(() => {
@@ -1400,10 +1442,17 @@ export class FillerBot implements Bot {
 					}
 					this.dlob = new DLOB();
 					await tryAcquire(this.userMapMutex).runExclusive(async () => {
-						await this.dlob.initFromUserMap(this.userMap);
+						await this.dlob.initFromUserMap(
+							this.userMap,
+							this.slotSubscriber.getSlot()
+						);
 					});
 					if (orderRecord) {
-						this.dlob.insertOrder(orderRecord.order, orderRecord.user);
+						this.dlob.insertOrder(
+							orderRecord.order,
+							orderRecord.user,
+							this.slotSubscriber.getSlot()
+						);
 					}
 				});
 

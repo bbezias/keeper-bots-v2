@@ -35,9 +35,12 @@ import {
 } from 'async-mutex';
 
 import {
+	AddressLookupTableAccount,
 	ComputeBudgetProgram,
+	GetVersionedTransactionConfig,
 	PublicKey,
 	Transaction,
+	TransactionInstruction,
 	TransactionResponse,
 } from '@solana/web3.js';
 
@@ -68,6 +71,8 @@ import {
 	isOrderDoesNotExistLog,
 	isTakerBreachedMaintenanceMarginLog,
 } from './common/txLogParse';
+import { TxSigAndSlot } from '@drift-labs/sdk/lib/tx/types';
+import { FillerConfig } from '../config';
 
 /**
  * Size of throttled nodes to get to before pruning the map
@@ -120,6 +125,8 @@ export class SpotFillerBot implements Bot {
 	private bulkAccountLoader: BulkAccountLoader | undefined;
 	private driftClient: DriftClient;
 	private pollingIntervalMs: number;
+	private transactionVersion: number;
+	private lookupTableAccount: AddressLookupTableAccount;
 
 	private dlobMutex: MutexInterface;
 	private dlob: DLOB;
@@ -167,41 +174,36 @@ export class SpotFillerBot implements Bot {
 	private pendingTransactionsGauge: ObservableGauge;
 
 	constructor(
-		name: string,
-		dryRun: boolean,
 		bulkAccountLoader: BulkAccountLoader | undefined,
 		clearingHouse: DriftClient,
 		runtimeSpec: RuntimeSpec,
-		pollingIntervalMs?: number,
-		metricsPort?: number
+		config: FillerConfig
 	) {
 		if (!bulkAccountLoader) {
 			throw new Error(
 				'SpotFiller only works in polling mode (cannot run with --websocket flag) bulkAccountLoader is required'
 			);
 		}
-		this.name = name;
-		this.dryRun = dryRun;
+		this.name = config.botId;
+		this.dryRun = config.dryRun;
 		this.bulkAccountLoader = bulkAccountLoader;
 		this.driftClient = clearingHouse;
 		this.runtimeSpec = runtimeSpec;
+		this.pollingIntervalMs =
+			config.fillerPollingInterval ?? this.defaultIntervalMs;
 
 		this.serumFulfillmentConfigMap = new SerumFulfillmentConfigMap(
 			clearingHouse
 		);
 		this.serumSubscribers = new Map<number, SerumSubscriber>();
 
-		if (!pollingIntervalMs) {
-			pollingIntervalMs = this.defaultIntervalMs;
-		}
-		this.pollingIntervalMs = pollingIntervalMs;
 		this.dlobMutex = withTimeout(
 			new Mutex(),
 			10 * this.pollingIntervalMs,
 			dlobMutexError
 		);
 
-		this.metricsPort = metricsPort;
+		this.metricsPort = config.metricsPort;
 		if (this.metricsPort) {
 			this.initializeMetrics();
 		}
@@ -214,6 +216,11 @@ export class SpotFillerBot implements Bot {
 				Atomics.store(this.pendingTransactionsArray, spotMarket.marketIndex, 0);
 			}
 		}
+
+		this.transactionVersion = config.transactionVersion ?? undefined;
+		logger.info(
+			`${this.name}: using transactionVersion: ${this.transactionVersion}`
+		);
 	}
 
 	private initializeMetrics() {
@@ -429,6 +436,10 @@ export class SpotFillerBot implements Bot {
 		}
 
 		await Promise.all(initPromises);
+
+		this.lookupTableAccount =
+			await this.driftClient.fetchMarketLookupTableAccount();
+
 		await webhookMessage(`[${this.name}]: started`);
 	}
 
@@ -718,7 +729,7 @@ export class SpotFillerBot implements Bot {
 		computeUnitLimit: number
 	): number {
 		if (currPendingTx < pendingTxKink1) {
-			return 0;
+			return 1;
 		} else if (
 			currPendingTx >= pendingTxKink1 &&
 			currPendingTx < pendingTxKink2
@@ -975,11 +986,13 @@ export class SpotFillerBot implements Bot {
 	private async processBulkFillTxLogs(nodeToFill: NodeToFill, txSig: string) {
 		let tx: TransactionResponse | null = null;
 		let attempts = 0;
+		const config: GetVersionedTransactionConfig = {
+			commitment: 'confirmed',
+			maxSupportedTransactionVersion: 0,
+		};
 		while (tx === null && attempts < 10) {
 			logger.info(`waiting for ${txSig} to be confirmed`);
-			tx = await this.driftClient.connection.getTransaction(txSig, {
-				commitment: 'confirmed',
-			});
+			tx = await this.driftClient.connection.getTransaction(txSig, config);
 			attempts++;
 			// sleep 1s
 			await this.sleep(1000);
@@ -1065,7 +1078,6 @@ export class SpotFillerBot implements Bot {
 			);
 		}
 
-		const txStart = Date.now();
 		const currPendingTxs = this.incPendingTransactions(
 			nodeToFill.node.order.marketIndex
 		);
@@ -1078,19 +1090,45 @@ export class SpotFillerBot implements Bot {
 			`sending - currPendingTxs: ${currPendingTxs}, computeUnits: ${computeUnits}, computeUnitsPrice: ${computeUnitsPrice}`
 		);
 
-		this.driftClient
-			.fillSpotOrder(
+		const ixs: Array<TransactionInstruction> = [];
+		ixs.push(ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnits }));
+		ixs.push(
+			ComputeBudgetProgram.setComputeUnitPrice({
+				microLamports: computeUnitsPrice,
+			})
+		);
+		ixs.push(
+			await this.driftClient.getFillSpotOrderIx(
 				chUser.getUserAccountPublicKey(),
 				chUser.getUserAccount(),
 				nodeToFill.node.order,
 				serumFulfillmentConfig,
 				makerInfo,
-				referrerInfo,
-				{
-					computeUnits,
-					computeUnitsPrice,
-				}
+				referrerInfo
 			)
+		);
+
+		let txResp: Promise<TxSigAndSlot>;
+		const txStart = Date.now();
+		if (isNaN(this.transactionVersion)) {
+			const tx = new Transaction();
+			for (const ix of ixs) {
+				tx.add(ix);
+			}
+			txResp = this.driftClient.txSender.send(tx, [], this.driftClient.opts);
+		} else if (this.transactionVersion === 0) {
+			txResp = this.driftClient.txSender.sendVersionedTransaction(
+				ixs,
+				[this.lookupTableAccount],
+				[],
+				this.driftClient.opts
+			);
+		} else {
+			throw new Error(
+				`unsupported transaction version ${this.transactionVersion}`
+			);
+		}
+		txResp
 			.then(async (txSig) => {
 				logger.info(`Filled spot order ${nodeSignature}, TX: ${txSig}`);
 
@@ -1109,7 +1147,7 @@ export class SpotFillerBot implements Bot {
 					method: 'fillSpotOrder',
 				});
 
-				await this.processBulkFillTxLogs(nodeToFill, txSig);
+				await this.processBulkFillTxLogs(nodeToFill, txSig.txSig);
 			})
 			.catch((e) => {
 				const pendingTxs = this.decPendingTransactions(
@@ -1151,7 +1189,10 @@ export class SpotFillerBot implements Bot {
 					this.dlob = new DLOB();
 					try {
 						await tryAcquire(this.userMapMutex).runExclusive(async () => {
-							await this.dlob.initFromUserMap(this.userMap);
+							await this.dlob.initFromUserMap(
+								this.userMap,
+								this.bulkAccountLoader.mostRecentSlot
+							);
 						});
 					} catch (e) {
 						if (e != E_ALREADY_LOCKED) {
@@ -1159,7 +1200,11 @@ export class SpotFillerBot implements Bot {
 						}
 					}
 					if (orderRecord) {
-						this.dlob.insertOrder(orderRecord.order, orderRecord.user);
+						this.dlob.insertOrder(
+							orderRecord.order,
+							orderRecord.user,
+							this.bulkAccountLoader.mostRecentSlot
+						);
 					}
 				});
 

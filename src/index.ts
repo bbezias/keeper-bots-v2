@@ -31,6 +31,7 @@ import {
 	DriftClientSubscriptionConfig,
 	LogProviderConfig,
 } from '@drift-labs/sdk';
+import { assert } from '@drift-labs/sdk/lib/assert/assert';
 import { promiseTimeout } from '@drift-labs/sdk/lib/util/promiseTimeout';
 import { Mutex } from 'async-mutex';
 
@@ -43,15 +44,19 @@ import { JitMakerBot } from './bots/jitMaker';
 import { LiquidatorBot } from './bots/liquidator';
 import { FloatingPerpMakerBot } from './bots/floatingMaker';
 import { Bot } from './types';
-import { Metrics } from './metrics';
 import { IFRevenueSettlerBot } from './bots/ifRevenueSettler';
 import { UserPnlSettlerBot } from './bots/userPnlSettler';
 import {
 	getOrCreateAssociatedTokenAccount,
 	TOKEN_FAUCET_PROGRAM_ID,
 } from './utils';
-import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import { bs58 } from '@project-serum/anchor/dist/cjs/utils/bytes';
+import {
+	Config,
+	configHasBot,
+	loadConfigFromFile,
+	loadConfigFromOpts,
+} from './config';
 
 require('dotenv').config();
 const driftEnv = (process.env.ENV || 'devnet') as DriftEnv;
@@ -61,30 +66,12 @@ const sdkConfig = initialize({ env: process.env.ENV });
 
 const stateCommitment: Commitment = 'confirmed';
 const healthCheckPort = process.env.HEALTH_CHECK_PORT || 8888;
-const metricsPort =
-	process.env.METRICS_PORT ||
-	PrometheusExporter.DEFAULT_OPTIONS.port.toString();
-
-const bulkAccountLoaderPollingInterval = process.env
-	.BULK_ACCOUNT_LOADER_POLLING_INTERVAL
-	? parseInt(process.env.BULK_ACCOUNT_LOADER_POLLING_INTERVAL)
-	: 5000;
-const eventSubscriberPollingInterval = process.env
-	.EVENT_SUBSCRIBER_POLLING_INTERVAL
-	? parseInt(process.env.EVENT_SUBSCRIBER_POLLING_INTERVAL)
-	: 5000;
-
-// TODO: do these bot specific configs better
-const fillerPollingInterval = process.env.FILLER_POLLING_INTERVAL
-	? parseInt(process.env.FILLER_POLLING_INTERVAL)
-	: 6000;
-const botId = process.env.BOT_ID;
 
 program
 	.option('-d, --dry-run', 'Dry run, do not send transactions on chain')
 	.option(
 		'--init-user',
-		'calls clearingHouse.initializeUserAccount if no user account exists'
+		'calls driftClient.initializeUserAccount if no user account exists'
 	)
 	.option('--filler', 'Enable filler bot')
 	.option('--spot-filler', 'Enable spot filler bot')
@@ -101,7 +88,7 @@ program
 		'--force-deposit <number>',
 		'Force deposit this amount of USDC to collateral account, the program will end after the deposit transaction is sent'
 	)
-	.option('--metrics <number>', 'Enable Prometheus metric scraper')
+	.option('--metrics <number>', 'Enable Prometheus metric scraper (deprecated)')
 	.addOption(
 		new Option(
 			'-p, --private-key <string>',
@@ -117,29 +104,63 @@ program
 		'--websocket',
 		'Use websocket instead of RPC polling for account updates'
 	)
+	.option(
+		'--disable-auto-derisking',
+		'Set to disable auto derisking (primarily used for liquidator to close inherited positions)'
+	)
+	.option(
+		'--subaccount <string>',
+		'subaccount(s) to use (comma delimited), specify which subaccountsIDs to load',
+		'0'
+	)
+	.option(
+		'--perp-markets <string>',
+		'comma delimited list of perp market ID(s) to liquidate (willing to inherit risk), omit for all',
+		''
+	)
+	.option(
+		'--spot-markets <string>',
+		'comma delimited list of spot market ID(s) to liquidate (willing to inherit risk), omit for all',
+		''
+	)
+	.option(
+		'--transaction-version <number>',
+		'Select transaction version (omit for legacy transaction)',
+		''
+	)
+	.option(
+		'--config-file <string>',
+		'Config file to load (yaml format), will override any other config options',
+		''
+	)
 	.parse();
 
 const opts = program.opts();
-setLogLevel(opts.debug ? 'debug' : 'info');
-
-logger.info(`Dry run: ${!!opts.dry},\n\
-FillerBot enabled: ${!!opts.filler},\n\
-SpotFillerBot enabled: ${!!opts.spotFiller},\n\
-TriggerBot enabled: ${!!opts.trigger},\n\
-JitMakerBot enabled: ${!!opts.jitMaker},\n\
-IFRevenueSettler enabled: ${!!opts.ifRevenueSettler},\n\
-userPnlSettler enabled: ${!!opts.userPnlSettler},\n\
-`);
-
+let config: Config = undefined;
+if (opts.configFile) {
+	logger.info(`Loading config from ${opts.configFile}`);
+	config = loadConfigFromFile(opts.configFile);
+} else {
+	logger.info(`Loading config from command line options`);
+	config = loadConfigFromOpts(opts);
+}
 logger.info(
-	`BulkAccountLoader polling interval: ${bulkAccountLoaderPollingInterval}ms`
+	`Bot config:\n${JSON.stringify(
+		config,
+		(k, v) => {
+			if (k === 'keeperPrivateKey') {
+				return '*'.repeat(v.length);
+			}
+			return v;
+		},
+		2
+	)}`
 );
-logger.info(
-	`EventSubscriber polling interval:   ${eventSubscriberPollingInterval}ms`
-);
+
+setLogLevel(config.global.debug ? 'debug' : 'info');
 
 export function getWallet(): Wallet {
-	const privateKey = process.env.KEEPER_PRIVATE_KEY;
+	const privateKey = config.global.keeperPrivateKey;
 	if (!privateKey) {
 		throw new Error(
 			'Must set environment variable KEEPER_PRIVATE_KEY with the path to a id.json or a list of commma separated numbers'
@@ -168,8 +189,8 @@ export function getWallet(): Wallet {
 	return new Wallet(keypair);
 }
 
-const endpoint = process.env.ENDPOINT;
-const wsEndpoint = process.env.WS_ENDPOINT;
+const endpoint = config.global.endpoint;
+const wsEndpoint = config.global.wsEndpoint;
 logger.info(`RPC endpoint: ${endpoint}`);
 logger.info(`WS endpoint:  ${wsEndpoint}`);
 logger.info(`DriftEnv:     ${driftEnv}`);
@@ -272,7 +293,7 @@ function printOpenPositions(clearingHouseUser: User) {
 const bots: Bot[] = [];
 const runBot = async () => {
 	const wallet = getWallet();
-	const clearingHousePublicKey = new PublicKey(sdkConfig.DRIFT_PROGRAM_ID);
+	const driftPublicKey = new PublicKey(sdkConfig.DRIFT_PROGRAM_ID);
 
 	const connection = new Connection(endpoint, {
 		wsEndpoint: wsEndpoint,
@@ -288,11 +309,11 @@ const runBot = async () => {
 		type: 'websocket',
 	};
 
-	if (!opts.websocket) {
+	if (!config.global.websocket) {
 		bulkAccountLoader = new BulkAccountLoader(
 			connection,
 			stateCommitment,
-			bulkAccountLoaderPollingInterval
+			config.global.bulkAccountLoaderPollingInterval
 		);
 		lastBulkAccountLoaderSlot = bulkAccountLoader.mostRecentSlot;
 		accountSubscription = {
@@ -302,14 +323,14 @@ const runBot = async () => {
 
 		logProviderConfig = {
 			type: 'polling',
-			frequency: eventSubscriberPollingInterval,
+			frequency: config.global.eventSubscriberPollingInterval,
 		};
 	}
 
 	const driftClient = new DriftClient({
 		connection,
 		wallet,
-		programID: clearingHousePublicKey,
+		programID: driftPublicKey,
 		perpMarketIndexes: PerpMarkets[driftEnv].map((mkt) => mkt.marketIndex),
 		spotMarketIndexes: SpotMarkets[driftEnv].map((mkt) => mkt.marketIndex),
 		oracleInfos: PerpMarkets[driftEnv].map((mkt) => {
@@ -329,6 +350,8 @@ const runBot = async () => {
 			type: 'retry',
 			timeout: 5000,
 		},
+		activeSubAccountId: config.global.subaccounts[0],
+		subAccountIds: config.global.subaccounts,
 	});
 
 	const eventSubscriber = new EventSubscriber(connection, driftClient.program, {
@@ -381,7 +404,7 @@ const runBot = async () => {
 
 	if (!(await driftClient.getUser().exists())) {
 		logger.error(`User for ${wallet.publicKey} does not exist`);
-		if (opts.initUser) {
+		if (config.global.initUser) {
 			logger.info(`Creating User for ${wallet.publicKey}`);
 			const [txSig] = await driftClient.initializeUserAccount();
 			logger.info(`Initialized user account in transaction: ${txSig}`);
@@ -408,14 +431,8 @@ const runBot = async () => {
 	await driftClient.fetchAccounts();
 	await driftClient.getUser().fetchAccounts();
 
-	let metrics: Metrics | undefined = undefined;
-	if (opts.metrics) {
-		metrics = new Metrics(driftClient, parseInt(opts?.metrics));
-		await metrics.init();
-	}
-
 	printUserAccountStats(driftUser);
-	if (opts.closeOpenPositions) {
+	if (config.global.closeOpenPositions) {
 		logger.info(`Closing open perp positions`);
 		let closedPerps = 0;
 		for await (const p of driftUser.getUserAccount().perpPositions) {
@@ -444,19 +461,23 @@ const runBot = async () => {
 
 	// check that user has collateral
 	const freeCollateral = driftUser.getFreeCollateral();
-	if (freeCollateral.isZero() && opts.jitMaker && !opts.forceDeposit) {
+	if (
+		freeCollateral.isZero() &&
+		configHasBot(config, 'jitMaker') &&
+		!config.global.forceDeposit
+	) {
 		throw new Error(
 			`No collateral in account, collateral is required to run JitMakerBot, run with --force-deposit flag to deposit collateral`
 		);
 	}
-	if (opts.forceDeposit) {
+	if (config.global.forceDeposit) {
 		logger.info(
 			`Depositing (${new BN(
-				opts.forceDeposit
+				config.global.forceDeposit
 			).toString()} USDC to collateral account)`
 		);
 
-		if (opts.forceDeposit < 0) {
+		if (config.global.forceDeposit < 0) {
 			logger.error(`Deposit amount must be greater than 0`);
 			throw new Error('Deposit amount must be greater than 0');
 		}
@@ -470,7 +491,7 @@ const runBot = async () => {
 			wallet.publicKey
 		);
 
-		const amount = new BN(opts.forceDeposit).mul(QUOTE_PRECISION);
+		const amount = new BN(config.global.forceDeposit).mul(QUOTE_PRECISION);
 
 		if (driftEnv == 'devnet') {
 			const tokenFaucet = new TokenFaucet(
@@ -502,7 +523,7 @@ const runBot = async () => {
 		}
 		ordersToCancel.push(order.orderId);
 	}
-	if (opts.cancelOpenOrders) {
+	if (config.global.cancelOpenOrders) {
 		for (const order of ordersToCancel) {
 			logger.info(`Cancelling open order ${order.toString()}`);
 			await driftClient.cancelOrder(order);
@@ -515,11 +536,9 @@ const runBot = async () => {
 	 * Start bots depending on flags enabled
 	 */
 
-	if (opts.filler) {
+	if (configHasBot(config, 'filler')) {
 		bots.push(
 			new FillerBot(
-				botId ? `filler-${botId}` : 'filler',
-				!!opts.dry,
 				slotSubscriber,
 				bulkAccountLoader,
 				driftClient,
@@ -527,105 +546,118 @@ const runBot = async () => {
 					rpcEndpoint: endpoint,
 					commit: commitHash,
 					driftEnv: driftEnv,
-					driftPid: clearingHousePublicKey.toBase58(),
+					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
-				fillerPollingInterval,
-				parseInt(metricsPort)
+				config.botConfigs.filler
 			)
 		);
 	}
-	if (opts.spotFiller) {
+	if (configHasBot(config, 'spotFiller')) {
 		bots.push(
 			new SpotFillerBot(
-				botId ? `spotFiller-${botId}` : 'spotFiller',
-				!!opts.dry,
 				bulkAccountLoader,
 				driftClient,
 				{
 					rpcEndpoint: endpoint,
 					commit: commitHash,
 					driftEnv: driftEnv,
-					driftPid: clearingHousePublicKey.toBase58(),
+					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
-				fillerPollingInterval,
-				parseInt(metricsPort)
+				config.botConfigs.spotFiller
 			)
 		);
 	}
-	if (opts.trigger) {
+	if (configHasBot(config, 'trigger')) {
 		bots.push(
 			new TriggerBot(
-				botId ? `trigger-${botId}` : 'trigger',
-				!!opts.dry,
 				bulkAccountLoader,
 				driftClient,
 				slotSubscriber,
-				metrics
+				{
+					rpcEndpoint: endpoint,
+					commit: commitHash,
+					driftEnv: driftEnv,
+					driftPid: driftPublicKey.toBase58(),
+					walletAuthority: wallet.publicKey.toBase58(),
+				},
+				config.botConfigs.trigger
 			)
 		);
 	}
-	if (opts.jitMaker) {
+	if (configHasBot(config, 'jitMaker')) {
 		bots.push(
 			new JitMakerBot(
-				botId ? `JitMaker-${botId}` : 'JitMaker',
-				!!opts.dry,
 				driftClient,
 				slotSubscriber,
-				metrics
+				{
+					rpcEndpoint: endpoint,
+					commit: commitHash,
+					driftEnv: driftEnv,
+					driftPid: driftPublicKey.toBase58(),
+					walletAuthority: wallet.publicKey.toBase58(),
+				},
+				config.botConfigs.trigger
 			)
 		);
 	}
-	if (opts.liquidator) {
+
+	if (configHasBot(config, 'liquidator')) {
+		assert(
+			config.global.subaccounts.length === 1,
+			'Liquidator bot only works with one subaccount specified'
+		);
+
 		bots.push(
 			new LiquidatorBot(
-				botId ? `liquidator-${botId}` : 'liquidator',
-				!!opts.dry,
 				bulkAccountLoader,
 				driftClient,
 				{
 					rpcEndpoint: endpoint,
 					commit: commitHash,
 					driftEnv: driftEnv,
-					driftPid: clearingHousePublicKey.toBase58(),
+					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
-				parseInt(metricsPort.toString())
+				config.botConfigs.liquidator
 			)
 		);
 	}
-	if (opts.floatingMaker) {
+	if (configHasBot(config, 'floatingMaker')) {
 		bots.push(
 			new FloatingPerpMakerBot(
-				botId ? `floatingMaker-${botId}` : 'floatingMaker',
-				!!opts.dry,
 				driftClient,
 				slotSubscriber,
-				metrics
+				{
+					rpcEndpoint: endpoint,
+					commit: commitHash,
+					driftEnv: driftEnv,
+					driftPid: driftPublicKey.toBase58(),
+					walletAuthority: wallet.publicKey.toBase58(),
+				},
+				config.botConfigs.floatingMaker
 			)
 		);
 	}
 
-	if (opts.userPnlSettler) {
+	if (configHasBot(config, 'userPnlSettler')) {
 		bots.push(
 			new UserPnlSettlerBot(
-				botId ? `userPnlSettler-${botId}` : 'userPnlSettler',
-				!!opts.dry,
 				driftClient,
 				PerpMarkets[driftEnv],
-				SpotMarkets[driftEnv]
+				SpotMarkets[driftEnv],
+				config.botConfigs.userPnlSettler
 			)
 		);
 	}
 
-	if (opts.ifRevenueSettler) {
+	if (configHasBot(config, 'ifRevenueSettler')) {
 		bots.push(
 			new IFRevenueSettlerBot(
-				botId ? `ifRevenueSettler-${botId}` : 'ifRevenueSettler',
-				!!opts.dry,
 				driftClient,
-				SpotMarkets[driftEnv]
+				SpotMarkets[driftEnv],
+				config.botConfigs.ifRevenueSettler
 			)
 		);
 	}
@@ -646,7 +678,7 @@ const runBot = async () => {
 	http
 		.createServer(async (req, res) => {
 			if (req.url === '/health') {
-				if (opts.testLiveness) {
+				if (config.global.testLiveness) {
 					if (Date.now() > startupTime + 60 * 1000) {
 						res.writeHead(500);
 						res.end('Testing liveness test fail');
@@ -654,7 +686,7 @@ const runBot = async () => {
 					}
 				}
 
-				if (opts.websocket) {
+				if (config.global.websocket) {
 					/* @ts-ignore */
 					if (!driftClient.connection._rpcWebSocketConnected) {
 						logger.error(`Connection rpc websocket disconnected`);
@@ -720,7 +752,7 @@ const runBot = async () => {
 		.listen(healthCheckPort);
 	logger.info(`Health check server listening on port ${healthCheckPort}`);
 
-	if (opts.runOnce) {
+	if (config.global.runOnce) {
 		process.exit(0);
 	}
 };
