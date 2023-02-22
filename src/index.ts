@@ -344,8 +344,6 @@ const runBot = async () => {
 		accountSubscription,
 		env: driftEnv,
 		userStats: true,
-		activeSubAccountId: +process.env.SUB_CLIENT_ID,
-    subAccountIds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
 		txSenderConfig: {
 			type: 'retry',
 			timeout: 5000,
