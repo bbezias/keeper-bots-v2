@@ -453,11 +453,13 @@ export class FillerBot implements Bot {
 			if (getVariant(actionRecord.action) === 'fill') {
 				const marketType = getVariant(actionRecord.marketType);
 				if (marketType === 'perp') {
-					this.observedFillsCountCounter.add(1, {
-						market:
+					if (PerpMarkets[this.runtimeSpec.driftEnv][actionRecord.marketIndex].symbol) {
+						this.observedFillsCountCounter.add(1, {
+							market:
 							PerpMarkets[this.runtimeSpec.driftEnv][actionRecord.marketIndex]
 								.symbol,
-					});
+						});
+					}
 				}
 			}
 		}
@@ -1414,7 +1416,11 @@ export class FillerBot implements Bot {
 						!errorCodesToSuppress.includes(errorCode) &&
 						!(e as Error).message.includes('Transaction was not confirmed')
 					) {
-						this.txSimErrorCounter.add(1, { errorCode: errorCode.toString() });
+						if (errorCode) {
+							this.txSimErrorCounter.add(1, {
+								errorCode: errorCode.toString(),
+							});
+						}
 						webhookMessage(
 							`[${this.name}]: :x: error simulating tx:\n${
 								simError.logs ? simError.logs.join('\n') : ''
