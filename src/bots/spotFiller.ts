@@ -25,6 +25,8 @@ import {
 	BASE_PRECISION,
 	PRICE_PRECISION,
 	WrappedEvent,
+	DLOBNode,
+	UserSubscriptionConfig,
 } from '@drift-labs/sdk';
 import {
 	Mutex,
@@ -117,12 +119,32 @@ enum METRIC_TYPES {
 	pending_transactions = 'pending_transactions',
 }
 
+function getMakerNodeFromNodeToFill(
+	nodeToFill: NodeToFill
+): DLOBNode | undefined {
+	if (nodeToFill.makerNodes.length === 0) {
+		return undefined;
+	}
+
+	if (nodeToFill.makerNodes.length > 1) {
+		logger.error(
+			`Found more than one maker node for spot nodeToFill: ${JSON.stringify(
+				nodeToFill
+			)}`
+		);
+		return undefined;
+	}
+
+	return nodeToFill.makerNodes[0];
+}
+
 export class SpotFillerBot implements Bot {
 	public readonly name: string;
 	public readonly dryRun: boolean;
 	public readonly defaultIntervalMs: number = 5000;
 
 	private bulkAccountLoader: BulkAccountLoader | undefined;
+	private userStatsMapSubscriptionConfig: UserSubscriptionConfig;
 	private driftClient: DriftClient;
 	private pollingIntervalMs: number;
 	private transactionVersion: number;
@@ -175,7 +197,7 @@ export class SpotFillerBot implements Bot {
 
 	constructor(
 		bulkAccountLoader: BulkAccountLoader | undefined,
-		clearingHouse: DriftClient,
+		driftClient: DriftClient,
 		runtimeSpec: RuntimeSpec,
 		config: FillerConfig
 	) {
@@ -186,15 +208,26 @@ export class SpotFillerBot implements Bot {
 		}
 		this.name = config.botId;
 		this.dryRun = config.dryRun;
+		this.driftClient = driftClient;
 		this.bulkAccountLoader = bulkAccountLoader;
-		this.driftClient = clearingHouse;
+		if (this.bulkAccountLoader) {
+			this.userStatsMapSubscriptionConfig = {
+				type: 'polling',
+				accountLoader: new BulkAccountLoader(
+					this.bulkAccountLoader.connection,
+					this.bulkAccountLoader.commitment,
+					0 // no polling
+				),
+			};
+		} else {
+			this.userStatsMapSubscriptionConfig =
+				this.driftClient.userAccountSubscriptionConfig;
+		}
 		this.runtimeSpec = runtimeSpec;
 		this.pollingIntervalMs =
 			config.fillerPollingInterval ?? this.defaultIntervalMs;
 
-		this.serumFulfillmentConfigMap = new SerumFulfillmentConfigMap(
-			clearingHouse
-		);
+		this.serumFulfillmentConfigMap = new SerumFulfillmentConfigMap(driftClient);
 		this.serumSubscribers = new Map<number, SerumSubscriber>();
 
 		this.dlobMutex = withTimeout(
@@ -395,7 +428,7 @@ export class SpotFillerBot implements Bot {
 				);
 				this.userStatsMap = new UserStatsMap(
 					this.driftClient,
-					this.driftClient.userAccountSubscriptionConfig
+					this.userStatsMapSubscriptionConfig
 				);
 
 				await this.userMap.fetchAllUsers();
@@ -558,7 +591,7 @@ export class SpotFillerBot implements Bot {
 					);
 					const newUserStatsMap = new UserStatsMap(
 						this.driftClient,
-						this.driftClient.userAccountSubscriptionConfig
+						this.userStatsMapSubscriptionConfig
 					);
 					newUserMap.fetchAllUsers().then(() => {
 						newUserStatsMap
@@ -637,20 +670,19 @@ export class SpotFillerBot implements Bot {
 
 		try {
 			await this.userMapMutex.runExclusive(async () => {
-				if (nodeToFill.makerNode) {
+				const makerNode = getMakerNodeFromNodeToFill(nodeToFill);
+				if (makerNode) {
 					const makerUserAccount = (
-						await this.userMap.mustGet(
-							nodeToFill.makerNode.userAccount.toString()
-						)
+						await this.userMap.mustGet(makerNode.userAccount.toString())
 					).getUserAccount();
 					const makerAuthority = makerUserAccount.authority;
 					const makerUserStats = (
 						await this.userStatsMap.mustGet(makerAuthority.toString())
 					).userStatsAccountPublicKey;
 					makerInfo = {
-						maker: nodeToFill.makerNode.userAccount,
+						maker: makerNode.userAccount,
 						makerUserAccount: makerUserAccount,
-						order: nodeToFill.makerNode.order,
+						order: makerNode.order,
 						makerStats: makerUserStats,
 					};
 				}
@@ -759,7 +791,7 @@ export class SpotFillerBot implements Bot {
 	 * Iterates through a tx's logs and handles it appropriately 3e.g. throttling users, updating metrics, etc.)
 	 *
 	 * @param nodesFilled nodes that we sent a transaction to fill
-	 * @param logs logs from tx.meta.logMessages or this.clearingHouse.program._events._eventParser.parseLogs
+	 * @param logs logs from tx.meta.logMessages or this.driftClient.program._events._eventParser.parseLogs
 	 *
 	 * @returns number of nodes successfully filled
 	 */
@@ -798,7 +830,8 @@ export class SpotFillerBot implements Bot {
 					errorThisFillIx = false;
 
 					// can also print this from parsing the log record in upcoming
-					if (nodeFilled.makerNode) {
+					const makerNode = getMakerNodeFromNodeToFill(nodeFilled);
+					if (makerNode) {
 						logger.info(
 							`Processing spot fill tx log:\ntaker: ${nodeFilled.node.userAccount.toBase58()}-${
 								nodeFilled.node.order.orderId
@@ -811,18 +844,15 @@ export class SpotFillerBot implements Bot {
 							)} @ ${convertToNumber(
 								nodeFilled.node.order.price,
 								PRICE_PRECISION
-							)}\nmaker: ${nodeFilled.makerNode.userAccount.toBase58()}-${
-								nodeFilled.makerNode.order.orderId
+							)}\nmaker: ${makerNode.userAccount.toBase58()}-${
+								makerNode.order.orderId
 							} ${convertToNumber(
-								nodeFilled.makerNode.order.baseAssetAmountFilled,
+								makerNode.order.baseAssetAmountFilled,
 								BASE_PRECISION
 							)}/${convertToNumber(
-								nodeFilled.makerNode.order.baseAssetAmount,
+								makerNode.order.baseAssetAmount,
 								BASE_PRECISION
-							)} @ ${convertToNumber(
-								nodeFilled.makerNode.order.price,
-								PRICE_PRECISION
-							)}`
+							)} @ ${convertToNumber(makerNode.order.price, PRICE_PRECISION)}`
 						);
 					} else {
 						logger.info(
@@ -867,7 +897,8 @@ export class SpotFillerBot implements Bot {
 			const makerBreachedMaintenanceMargin =
 				isMakerBreachedMaintenanceMarginLog(log);
 			if (makerBreachedMaintenanceMargin) {
-				if (!nodeFilled.makerNode) {
+				const makerNode = getMakerNodeFromNodeToFill(nodeFilled);
+				if (!makerNode) {
 					logger.error(
 						`Got maker breached maint. margin log, but don't have a maker node: ${log}\n${JSON.stringify(
 							nodeFilled,
@@ -879,12 +910,12 @@ export class SpotFillerBot implements Bot {
 				}
 				const makerNodeSignature =
 					this.getFillSignatureFromUserAccountAndOrderId(
-						nodeFilled.makerNode.userAccount.toString(),
-						nodeFilled.makerNode.order.orderId.toString()
+						makerNode.userAccount.toString(),
+						makerNode.order.orderId.toString()
 					);
 				logger.error(
-					`maker breach maint. margin, assoc node: ${nodeFilled.makerNode.userAccount.toString()}, ${
-						nodeFilled.makerNode.order.orderId
+					`maker breach maint. margin, assoc node: ${makerNode.userAccount.toString()}, ${
+						makerNode.order.orderId
 					}; (throttling ${makerNodeSignature}); ${log}`
 				);
 				this.throttledNodes.set(makerNodeSignature, Date.now());
@@ -899,11 +930,9 @@ export class SpotFillerBot implements Bot {
 				);
 				tx.add(
 					await this.driftClient.getForceCancelOrdersIx(
-						nodeFilled.makerNode.userAccount,
+						makerNode.userAccount,
 						(
-							await this.userMap.mustGet(
-								nodeFilled.makerNode.userAccount.toString()
-							)
+							await this.userMap.mustGet(makerNode.userAccount.toString())
 						).getUserAccount()
 					)
 				);
@@ -911,7 +940,7 @@ export class SpotFillerBot implements Bot {
 					.send(tx, [], this.driftClient.opts)
 					.then((txSig) => {
 						logger.info(
-							`Force cancelled orders for maker ${nodeFilled.makerNode.userAccount.toBase58()} due to breach of maintenance margin. Tx: ${txSig}`
+							`Force cancelled orders for maker ${makerNode.userAccount.toBase58()} due to breach of maintenance margin. Tx: ${txSig}`
 						);
 					})
 					.catch((e) => {
@@ -1028,7 +1057,8 @@ export class SpotFillerBot implements Bot {
 		}
 
 		// TODO: confirm if order.baseAssetAmount can use BASE_PRECISION for spot order
-		if (nodeToFill.makerNode) {
+		const makerNode = getMakerNodeFromNodeToFill(nodeToFill);
+		if (makerNode) {
 			logger.info(
 				`filling spot node:\ntaker: ${nodeToFill.node.userAccount.toBase58()}-${
 					nodeToFill.node.order.orderId
@@ -1041,18 +1071,15 @@ export class SpotFillerBot implements Bot {
 				)} @ ${convertToNumber(
 					nodeToFill.node.order.price,
 					PRICE_PRECISION
-				)}\nmaker: ${nodeToFill.makerNode.userAccount.toBase58()}-${
-					nodeToFill.makerNode.order.orderId
+				)}\nmaker: ${makerNode.userAccount.toBase58()}-${
+					makerNode.order.orderId
 				} ${convertToNumber(
-					nodeToFill.makerNode.order.baseAssetAmountFilled,
+					makerNode.order.baseAssetAmountFilled,
 					BASE_PRECISION
 				)}/${convertToNumber(
-					nodeToFill.makerNode.order.baseAssetAmount,
+					makerNode.order.baseAssetAmount,
 					BASE_PRECISION
-				)} @ ${convertToNumber(
-					nodeToFill.makerNode.order.price,
-					PRICE_PRECISION
-				)}`
+				)} @ ${convertToNumber(makerNode.order.price, PRICE_PRECISION)}`
 			);
 		} else {
 			logger.info(
