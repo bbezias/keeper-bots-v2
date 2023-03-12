@@ -17,6 +17,7 @@ import { BaseBotConfig } from '../config';
 export class IFRevenueSettlerBot implements Bot {
 	public readonly name: string;
 	public readonly dryRun: boolean;
+	public readonly runOnce: boolean;
 	public readonly defaultIntervalMs: number = 600000;
 
 	private driftClient: DriftClient;
@@ -33,6 +34,7 @@ export class IFRevenueSettlerBot implements Bot {
 	) {
 		this.name = config.botId;
 		this.dryRun = config.dryRun;
+		this.runOnce = config.runOnce || false;
 		this.driftClient = driftClient;
 		this.spotMarkets = spotMarkets;
 	}
@@ -50,11 +52,15 @@ export class IFRevenueSettlerBot implements Bot {
 
 	public async startIntervalLoop(intervalMs: number): Promise<void> {
 		logger.info(`${this.name} Bot started!`);
-		const intervalId = setInterval(
-			this.trySettleIFRevenue.bind(this),
-			intervalMs
-		);
-		this.intervalIds.push(intervalId);
+		if (this.runOnce) {
+			await this.trySettleIFRevenue();
+		} else {
+			const intervalId = setInterval(
+				this.trySettleIFRevenue.bind(this),
+				intervalMs
+			);
+			this.intervalIds.push(intervalId);
+		}
 	}
 
 	public async healthCheck(): Promise<boolean> {
@@ -139,11 +145,21 @@ export class IFRevenueSettlerBot implements Bot {
 					}
 				}
 			}
-		} catch (e) {
-			console.error(e);
-			await webhookMessage(
-				`[${this.name}]: :x: uncaught error:\n${e.stack ? e.stack : e.message}`
-			);
+		} catch (err) {
+			console.error(err);
+			if (
+				!(err as Error).message.includes('Transaction was not confirmed') &&
+				!(err as Error).message.includes('Blockhash not found')
+			) {
+				const errorCode = getErrorCode(err);
+				await webhookMessage(
+					`[${
+						this.name
+					}]: :x: IF Revenue Settler error: Error code: ${errorCode}:\n${
+						err.logs ? (err.logs as Array<string>).join('\n') : ''
+					}\n${err.stack ? err.stack : err.message}`
+				);
+			}
 		} finally {
 			logger.info('Settle IF Revenues finished');
 			await this.watchdogTimerMutex.runExclusive(async () => {
