@@ -429,7 +429,7 @@ const runBot = async () => {
 	await driftClient.fetchAccounts();
 	await driftClient.getUser().fetchAccounts();
 
-	printUserAccountStats(driftUser);
+	// printUserAccountStats(driftUser);
 	if (config.global.closeOpenPositions) {
 		logger.info(`Closing open perp positions`);
 		let closedPerps = 0;
