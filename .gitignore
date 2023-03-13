@@ -144,3 +144,5 @@ lib
 
 config.yaml
 .env.old
+/config-liquidator.yaml
+/config-filler-spot.yaml
