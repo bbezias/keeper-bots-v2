@@ -4,8 +4,8 @@ services:
   filler:
     build: .
     image: filler-bot
-    expose:
-      - "9464"
+    ports:
+      - "9464:9464"
       - "3040"
     restart: unless-stopped
     command: sh -c "yarn run dev:filler --websocket"

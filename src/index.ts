@@ -596,7 +596,7 @@ const runBot = async () => {
 					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
-				config.botConfigs.trigger
+				config.botConfigs.jitMaker
 			)
 		);
 	}

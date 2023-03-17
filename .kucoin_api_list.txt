@@ -1,0 +1,12 @@
+jitMaker subaccount
+grosgrosbgSubAccount1
+Key
+641178c48327d80001dcb2ad
+Secret
+15a9ac8b-537d-408e-992b-0740968745d3
+
+Main account
+Key
+64102f2c51350f00011f9031
+Secret
+368aa330-e0df-410c-a442-b49a33300e10

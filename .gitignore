@@ -144,3 +144,6 @@ lib
 
 config.yaml
 .env.old
+/config-jit-maker.yaml
+config-liquidator.yaml
+config-filler-spot.yaml

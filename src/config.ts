@@ -20,13 +20,27 @@ export type LiquidatorConfig = BaseBotConfig & {
 	disableAutoDerisking: boolean;
 };
 
+export type JitMakerConfig = BaseBotConfig & {
+	profitThreshold: number;
+	profitThresholdIfReduce: number;
+	kucoinTakerFee: number;
+	maxPositionExposure: number;
+	maxTradeSize: {
+		sol: number,
+		btc: number
+		eth: number,
+		apt: number,
+		matic: number
+	}
+};
+
 export type BotConfigMap = {
 	filler?: FillerConfig;
 	spotFiller?: FillerConfig;
 	trigger?: BaseBotConfig;
 	liquidator?: LiquidatorConfig;
 	floatingMaker?: BaseBotConfig;
-	jitMaker?: BaseBotConfig;
+	jitMaker?: JitMakerConfig;
 	ifRevenueSettler?: BaseBotConfig;
 	userPnlSettler?: BaseBotConfig;
 };
@@ -197,8 +211,12 @@ export function loadConfigFromOpts(opts: any): Config {
 		config.botConfigs.jitMaker = {
 			dryRun: opts.dryRun ?? false,
 			botId: process.env.BOT_ID ?? 'jitMaker',
-			metricsPort: 9464,
-			runOnce: opts.runOnce ?? false,
+			metricsPort: 9468,
+			kucoinTakerFee: opts.kucoinTakerFee ?? 0.0006,
+			maxTradeSize: opts.maxTradeSize ?? {sol: 0.1, btc: 0.001, eth: 0.01, apt: 0.1, matic: 10},
+			maxPositionExposure: opts.maxPositionExposure ?? 0.1,
+			profitThreshold: opts.profitThreshold ?? 0.0025,
+			profitThresholdIfReduce: opts.profitThresholdIfReduce ?? 0.0005
 		};
 	}
 	if (opts.ifRevenueSettler) {
