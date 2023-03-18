@@ -1043,14 +1043,16 @@ export class JitMakerBot implements Bot {
 
   private async executeAction(action: Action, tradeIdx: number): Promise<TransactionSignature> {
 
+    const t1 = (new Date()).getTime();
     const takerUserAccount = (
       await this.userMap.mustGet(action.node.userAccount.toString())
     ).getUserAccount();
     const takerAuthority = takerUserAccount.authority;
-
+    const t2 = (new Date()).getTime();
     const takerUserStats = await this.userStatsMap.mustGet(
       takerAuthority.toString()
     );
+    const t3 = (new Date()).getTime();
     const takerUserStatsPublicKey = takerUserStats.userStatsAccountPublicKey;
     const referrerInfo = takerUserStats.getReferrerInfo();
 
@@ -1077,6 +1079,8 @@ export class JitMakerBot implements Bot {
       referrerInfo
     );
 
+    const t4 = (new Date()).getTime();
+
     const ixSetComputeUniteLimit = ComputeBudgetProgram.setComputeUnitLimit({
       units: COMPUTE_UNITS,
     });
@@ -1084,7 +1088,8 @@ export class JitMakerBot implements Bot {
     const provider = this.driftClient.provider;
     const connection = this.driftClient.connection;
     const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-
+    const t5 = (new Date()).getTime();
+    logger.debug(`t1 -> t2: ${t2 - t1} ms, t2 -> t3: ${t3 - t2} ms, t3 -> t4: ${t4 - t3} ms, t4 -> t5: ${t5 - t4} ms`);
     const message = new TransactionMessage({
       payerKey: provider.publicKey,
       recentBlockhash: latestBlockhash.blockhash,
