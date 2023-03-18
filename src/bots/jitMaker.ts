@@ -433,6 +433,7 @@ export class JitMakerBot implements Bot {
     logger.info("Kucoin initiating");
     this.kucoin = new KucoinController();
     await this.kucoin.initialise();
+    await sleep(2000);
     this.kucoin.subscribe(KUCOIN_CONTRACTS.sol).then(() => {
       logger.info(`✅ Websocket SOLUSDTM subscribed with kucoin`);
     });
@@ -1092,6 +1093,8 @@ export class JitMakerBot implements Bot {
 
     const transaction = new VersionedTransaction(message);
     transaction.sign([(provider.wallet as Wallet).payer]);
+
+    logger.info(`${tradeIdx} - Sending transaction...`);
 
     const sig = await connection.sendTransaction(transaction, { maxRetries: 2 });
 
