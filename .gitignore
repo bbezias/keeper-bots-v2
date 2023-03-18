@@ -146,3 +146,5 @@ config.yaml
 .env.old
 /config-liquidator.yaml
 /config-filler-spot.yaml
+docker-compose.yml
+config-jit-maker.yaml
