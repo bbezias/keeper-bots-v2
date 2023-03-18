@@ -19,11 +19,11 @@ import {
   UserMap,
   UserStatsMap,
   getOrderSignature,
-  MarketType, PostOnlyParams, calculateBidAskPrice,
+  MarketType, PostOnlyParams, calculateBidAskPrice, Wallet,
 } from '@drift-labs/sdk';
 import { Mutex, tryAcquire, withTimeout, E_ALREADY_LOCKED } from 'async-mutex';
 
-import { TransactionSignature, PublicKey } from '@solana/web3.js';
+import { TransactionSignature, PublicKey, TransactionMessage, VersionedTransaction, ComputeBudgetProgram } from '@solana/web3.js';
 
 import { getErrorCode } from '../error';
 import { logger } from '../logger';
@@ -118,6 +118,8 @@ const INDEX_TO_SYMBOL = {
   5: KUCOIN_CONTRACTS.matic
 };
 
+const COMPUTE_UNITS = 600_000;
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -196,6 +198,8 @@ export class JitMakerBot implements Bot {
   private watchdogTimerMutex = new Mutex();
   private watchdogTimerLastPatTime = Date.now();
 
+  private takingPositionMutex = new Mutex();
+
   /**
    * Set true to enforce max position size
    */
@@ -261,6 +265,8 @@ export class JitMakerBot implements Bot {
   };
 
   private isActive = false;
+
+  private tradeIndex = 0;
 
   constructor(
     clearingHouse: DriftClient,
@@ -377,12 +383,16 @@ export class JitMakerBot implements Bot {
         logger.error(`Issue getting delta for ${marketIndex} - missing drift`);
       }
 
-      const driftMid = (formattedAskPrice + formattedBidPrice) / 2;
-      this.deltaKucoinDrift[marketIndex].add(kucoinMid / driftMid);
-      this.exchangeDelta[marketIndex] = this.deltaKucoinDrift[marketIndex].getAverage();
-      this.exchangeDeltaTime[marketIndex] = now + 30000;
       const name = INDEX_TO_NAME[marketIndex];
-      logger.debug(`Ratio update for ${name}: ${this.exchangeDelta[marketIndex]}`);
+      const driftMid = (formattedAskPrice + formattedBidPrice) / 2;
+      const value = kucoinMid / driftMid;
+      if (value < 0.95 || value > 1.05) {
+        logger.warn(`${name} Skipping new exchange delta because does not meet threshold ${value.toFixed(5)}`);
+      } else {
+        this.deltaKucoinDrift[marketIndex].add(value);
+        this.exchangeDelta[marketIndex] = this.deltaKucoinDrift[marketIndex].getAverage();
+        this.exchangeDeltaTime[marketIndex] = now + 30000;
+      }
     });
   }
 
@@ -782,41 +792,20 @@ export class JitMakerBot implements Bot {
   }
 
   /**
-   *
-   */
-  private determineJitAuctionBaseFillAmount(
-    orderBaseAmountAvailable: BN,
-    maxSizeInLot: number,
-    kucoinLotSize: number
-  ): BN {
-
-    const amountAvailable = convertToNumber(orderBaseAmountAvailable, BASE_PRECISION);
-
-    if (amountAvailable < kucoinLotSize) return new BN(0);
-
-    const amountAvailableInLot = Math.trunc(amountAvailable / kucoinLotSize);
-    const amountToTakeInLot = Math.min(maxSizeInLot, amountAvailableInLot);
-    const baseFillAmountNumber = amountToTakeInLot * kucoinLotSize;
-    return new BN(
-      baseFillAmountNumber * BASE_PRECISION.toNumber()
-    );
-  }
-
-  /**
    * Draws an action based on the current state of the bot.
    *
    */
   private async drawAndExecuteAction(market: PerpMarketAccount) {
 
+    const marketIndex = market.marketIndex;
     try {
       // get nodes available to fill in the jit auction
       const nodesToFill = this.dlob.findJitAuctionNodesToFill(
-        market.marketIndex,
+        marketIndex,
         this.slotSubscriber.getSlot(),
         this.driftClient.getOracleDataForPerpMarket(market.marketIndex),
         MarketType.PERP
       );
-
 
       for (const nodeToFill of nodesToFill) {
         if (
@@ -828,12 +817,6 @@ export class JitMakerBot implements Bot {
           continue;
         }
 
-        // calculate jit maker order params
-        const orderDirection = nodeToFill.node.order.direction;
-        const jitMakerDirection = isVariant(orderDirection, 'long')
-          ? PositionDirection.SHORT
-          : PositionDirection.LONG;
-
         const startPrice = convertToNumber(
           nodeToFill.node.order.auctionStartPrice,
           PRICE_PRECISION
@@ -843,26 +826,34 @@ export class JitMakerBot implements Bot {
           PRICE_PRECISION
         );
 
-        const kucoinBook = this.bookKucoin[market.marketIndex];
+        const kucoinBook = this.bookKucoin[marketIndex];
 
         if (!kucoinBook) {
           logger.error(
-            `Kucoin price not found for market ${market.marketIndex}`
+            `Kucoin price not found for market ${marketIndex}`
           );
           continue;
         } else if (kucoinBook.datetime.getTime() < new Date().getTime() - 10000) {
           logger.error(
-            `Kucoin price not updated for market ${market.marketIndex} since ${(new Date().getTime() - kucoinBook.datetime.getTime()) / 1000} seconds`
+            `Kucoin price not updated for market ${marketIndex} since ${(new Date().getTime() - kucoinBook.datetime.getTime()) / 1000} seconds`
           );
           continue;
         }
 
-        const jitMakerBaseAssetAmount = this.determineJitAuctionBaseFillAmount(
-          nodeToFill.node.order.baseAssetAmount.sub(
-            nodeToFill.node.order.baseAssetAmountFilled
-          ),
-          this.maxTradeSizeInLot[market.marketIndex],
-          this.futureKucoinContract[market.marketIndex].multiplier
+        const baseAmountToBeFilled = nodeToFill.node.order.baseAssetAmount.sub(
+          nodeToFill.node.order.baseAssetAmountFilled
+        );
+        const kucoinLotSize = this.futureKucoinContract[marketIndex].multiplier;
+
+        const amountAvailable = convertToNumber(baseAmountToBeFilled, BASE_PRECISION);
+        const maxSizeInLot = this.maxTradeSizeInLot[marketIndex];
+        if (amountAvailable < kucoinLotSize) continue;
+
+        const amountAvailableInLot = Math.trunc(amountAvailable / kucoinLotSize);
+        const amountToTakeInLot = Math.min(maxSizeInLot, amountAvailableInLot);
+        const baseFillAmountNumber = amountToTakeInLot * kucoinLotSize;
+        const jitMakerBaseAssetAmount = new BN(
+          baseFillAmountNumber * BASE_PRECISION.toNumber()
         );
 
         const amount = convertToNumber(jitMakerBaseAssetAmount, BASE_PRECISION);
@@ -875,11 +866,11 @@ export class JitMakerBot implements Bot {
         const bestAsk = kucoinBook.bestAsk(amount);
         const bestBid = kucoinBook.bestBid(amount);
 
-        if (this.exchangeDelta[market.marketIndex] === 0) {
+        if (this.exchangeDelta[marketIndex] === 0) {
           continue;
         }
 
-        const factor = this.exchangeDelta[market.marketIndex];
+        const factor = this.exchangeDelta[marketIndex];
 
         const bestAskUsdc = bestAsk / factor;
         const bestBidUsdc = bestBid / factor;
@@ -887,8 +878,33 @@ export class JitMakerBot implements Bot {
         if (endPrice < 0 || startPrice < 0) continue;
         if (bestAskUsdc * 2 < endPrice || bestBidUsdc / 2 > endPrice) continue;
 
+        // calculate jit maker order params
+        const orderDirection = nodeToFill.node.order.direction;
+        const jitMakerDirection = isVariant(orderDirection, 'long')
+          ? PositionDirection.SHORT
+          : PositionDirection.LONG;
+
+        const currentState = this.agentState.stateType.get(marketIndex);
+        if (this.RESTRICT_POSITION_SIZE) {
+          if (
+            currentState === StateType.CLOSING_LONG &&
+            jitMakerDirection === PositionDirection.LONG
+          ) {
+            continue;
+          }
+          if (
+            currentState === StateType.CLOSING_SHORT &&
+            jitMakerDirection === PositionDirection.SHORT
+          ) {
+            continue;
+          }
+        }
+
+        this.tradeIndex += 1;
+        const idx = this.tradeIndex;
+
         logger.info(
-          `node slot: ${
+          `${idx} - node slot: ${
             nodeToFill.node.order.slot
           }, cur slot: ${this.slotSubscriber.getSlot()}`
         );
@@ -901,9 +917,7 @@ export class JitMakerBot implements Bot {
         );
 
         logger.info(
-          `${
-            this.name
-          } quoting order for node: ${nodeToFill.node.userAccount.toBase58()} - ${nodeToFill.node.order.orderId.toString()}, orderBaseFilled: ${convertToNumber(
+          `${idx} - quoting order for node: ${nodeToFill.node.userAccount.toBase58()} - ${nodeToFill.node.order.orderId.toString()}, orderBaseFilled: ${convertToNumber(
             nodeToFill.node.order.baseAssetAmountFilled,
             BASE_PRECISION
           )}/${convertToNumber(
@@ -924,7 +938,6 @@ export class JitMakerBot implements Bot {
         let positionOnDrift = '';
         let bestKucoinValue;
         let acceptablePrice = 0;
-        const currentState = this.agentState.stateType.get(market.marketIndex);
         if (jitMakerDirection === PositionDirection.LONG) {
           if (currentState === StateType.CLOSING_SHORT) pt = this.profitThresholdIfReduce;
           acceptablePrice = bestAskUsdc / (1 + this.kucoinTakerFee + pt);
@@ -957,19 +970,26 @@ export class JitMakerBot implements Bot {
           }
         }
 
-        logger.info("===========================================");
-        logger.info(`New Auction found on ${INDEX_TO_NAME[market.marketIndex]} : Taker is ${positionOnDrift === "long" ? "⬇️" : "⬆️"}️ / Maker is ${positionOnDrift === "long" ? "⬆️️" : "⬇️"}️ start price: ${startPrice.toFixed(4)} slot: ${currSlot} / end price: ${endPrice.toFixed(4)} slot: ${aucEnd}`);
-        logger.info(`Start price: ${startPrice.toFixed(4)} slot: ${currSlot} / End price: ${endPrice.toFixed(4)} slot: ${aucEnd}`);
-        logger.info(`Amount: ${amount} / Total to fill: ${amountToFill} / Already filled: ${amountFilled}`);
-        logger.info(`Kucoin Adjusted: Bid ${bestBidUsdc.toFixed(4)} Ask ${bestAskUsdc.toFixed(4)}, factor: ${factor}`);
-        logger.info(`Kucoin: Bid ${bestBid.toFixed(4)} Ask ${bestAsk.toFixed(4)}`);
+        logger.info(`${idx} - New Auction found on ${INDEX_TO_NAME[market.marketIndex]} : Taker is ${positionOnDrift === "long" ? "⬇️" : "⬆️"}️ / Maker is ${positionOnDrift === "long" ? "⬆️️" : "⬇️"}️ start price: ${startPrice.toFixed(4)} slot: ${currSlot} / end price: ${endPrice.toFixed(4)} slot: ${aucEnd}`);
+        logger.info(`${idx} - Start price: ${startPrice.toFixed(4)} slot: ${currSlot} / End price: ${endPrice.toFixed(4)} slot: ${aucEnd}`);
+        logger.info(`${idx} - Amount: ${amount} / Total to fill: ${amountToFill} / Already filled: ${amountFilled}`);
+        logger.info(`${idx} - Kucoin Adjusted: Bid ${bestBidUsdc.toFixed(4)} Ask ${bestAskUsdc.toFixed(4)}, factor: ${factor}`);
+        logger.info(`${idx} - Kucoin: Bid ${bestBid.toFixed(4)} Ask ${bestAsk.toFixed(4)}`);
         const virtualPnL = amount * virtualPnLRel * offeredPrice;
 
+        if (currSlot >= aucEnd) {
+          logger.warn(`${idx} - Processing error too late delta between curr slot and aucEnd: ${currSlot - aucEnd}`);
+        }
+
+        logger.debug(`${idx} - aucend - currslot ${aucEnd - currSlot}`);
+
         if (takePosition || isTestingAccount) {
-          logger.info(`Bidding this auction ${positionOnDrift} at: ${offeredPrice.toFixed(4)}, hedge on Kucoin for ${bestKucoinValue}`);
-          logger.info(`Virtual PnL: $ ${virtualPnL.toFixed(2)} / ${(virtualPnLRel * 100).toFixed(2)}%`);
+          logger.info(`${idx} - Bidding this auction ${positionOnDrift} at: ${offeredPrice.toFixed(4)}, hedge on Kucoin for ${bestKucoinValue}`);
+          logger.info(`${idx} - Virtual PnL: $ ${virtualPnL.toFixed(2)} / ${(virtualPnLRel * 100).toFixed(2)}%`);
 
           const offeredPriceBn = new BN(offeredPrice * PRICE_PRECISION.toNumber());
+          if (this.takingPositionMutex.isLocked()) continue;
+          const release = await this.takingPositionMutex.acquire();
           try {
 
             const txSig = await this.executeAction({
@@ -978,14 +998,9 @@ export class JitMakerBot implements Bot {
               direction: jitMakerDirection,
               price: offeredPriceBn,
               node: nodeToFill.node,
-            });
+            }, idx);
 
-            if (txSig) {
-              logger.info(`☑️ JIT auction filled (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}), Tx: ${txSig}`);
-            } else {
-              logger.error(`⛔ Skip offering`);
-            }
-            return txSig;
+            logger.info(`${idx} - ✅ JIT auction filled (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}), Tx: ${txSig}`);
           } catch (e) {
             nodeToFill.node.haveFilled = false;
 
@@ -997,31 +1012,20 @@ export class JitMakerBot implements Bot {
               this.errorCounter.add(1, { errorCode: errorCode.toString() });
 
               if (errorCode === 6061) {
-                logger.warn(`JIT auction (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}): too late, offer dont exists anymore`);
+                logger.warn(`${idx} - ❌ JIT auction (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}): too late, offer dont exists anymore`);
               } else {
                 logger.error(
-                  `Error (${errorCode}) filling JIT auction (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()})`
+                  `${idx} - ❌ Error (${errorCode}) filling JIT auction (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()})`
                 );
               }
             } else {
+              logger.error(`${idx} - ❌ Error Other error while doing transaction`);
               console.log(e);
             }
 
-            /* todo remove this, fix error handling
-            if (errorCode === 6042) {
-              this.dlob.remove(
-                nodeToFill.node.order,
-                nodeToFill.node.userAccount,
-                () => {
-                  logger.error(
-                    `Order ${nodeToFill.node.order.orderId.toString()} not found when trying to fill. Removing from order list`
-                  );
-                }
-              );
-            }
-            */
-
             // console.error(error);
+          } finally {
+            release();
           }
         } else {
           logger.info(`⛔ Skip offering, acceptable price ${acceptablePrice} - Pnl would be ${(virtualPnLRel * 100).toFixed(2)}% below the limit ${(pt * 100).toFixed(2)}%`);
@@ -1033,29 +1037,7 @@ export class JitMakerBot implements Bot {
     }
   }
 
-  private async executeAction(action: Action): Promise<TransactionSignature> {
-    const currentState = this.agentState.stateType.get(action.marketIndex);
-
-    if (this.RESTRICT_POSITION_SIZE) {
-      if (
-        currentState === StateType.CLOSING_LONG &&
-        action.direction === PositionDirection.LONG
-      ) {
-        logger.info(
-          `${this.name}: Skipping long action on market ${action.marketIndex}, since currently CLOSING_LONG`
-        );
-        return;
-      }
-      if (
-        currentState === StateType.CLOSING_SHORT &&
-        action.direction === PositionDirection.SHORT
-      ) {
-        logger.info(
-          `${this.name}: Skipping short action on market ${action.marketIndex}, since currently CLOSING_SHORT`
-        );
-        return;
-      }
-    }
+  private async executeAction(action: Action, tradeIdx: number): Promise<TransactionSignature> {
 
     const takerUserAccount = (
       await this.userMap.mustGet(action.node.userAccount.toString())
@@ -1068,24 +1050,58 @@ export class JitMakerBot implements Bot {
     const takerUserStatsPublicKey = takerUserStats.userStatsAccountPublicKey;
     const referrerInfo = takerUserStats.getReferrerInfo();
 
-    return await this.driftClient.placeAndMakePerpOrder(
-      {
-        orderType: OrderType.LIMIT,
-        marketIndex: action.marketIndex,
-        baseAssetAmount: action.baseAssetAmount,
-        direction: action.direction,
-        price: action.price,
-        postOnly: PostOnlyParams.MUST_POST_ONLY,
-        immediateOrCancel: true,
-      },
-      {
-        taker: action.node.userAccount,
-        order: action.node.order,
-        takerStats: takerUserStatsPublicKey,
-        takerUserAccount: takerUserAccount,
-      },
+    const orderParams = {
+      orderType: OrderType.LIMIT,
+      marketIndex: action.marketIndex,
+      baseAssetAmount: action.baseAssetAmount,
+      direction: action.direction,
+      price: action.price,
+      postOnly: PostOnlyParams.MUST_POST_ONLY,
+      immediateOrCancel: true,
+    };
+
+    const takerInfo = {
+      taker: action.node.userAccount,
+      order: action.node.order,
+      takerStats: takerUserStatsPublicKey,
+      takerUserAccount: takerUserAccount,
+    };
+
+    const ix = await this.driftClient.getPlaceAndMakePerpOrderIx(
+      orderParams,
+      takerInfo,
       referrerInfo
     );
+
+    const ixSetComputeUniteLimit = ComputeBudgetProgram.setComputeUnitLimit({
+      units: COMPUTE_UNITS,
+    });
+
+    const provider = this.driftClient.provider;
+    const connection = this.driftClient.connection;
+    const latestBlockhash = await connection.getLatestBlockhash('confirmed');
+
+    const message = new TransactionMessage({
+      payerKey: provider.publicKey,
+      recentBlockhash: latestBlockhash.blockhash,
+      instructions: [ixSetComputeUniteLimit, ix]
+    }).compileToV0Message();
+
+    const transaction = new VersionedTransaction(message);
+    transaction.sign([(provider.wallet as Wallet).payer]);
+
+    const sig = await connection.sendTransaction(transaction, { maxRetries: 2 });
+
+    logger.info(`${tradeIdx} - Transaction sent, pending confirmation, sig ${sig}`);
+
+    const confirmation = await connection.confirmTransaction({
+      signature: sig,
+      blockhash: latestBlockhash.blockhash,
+      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+    }, 'confirmed');
+
+    this.driftClient.perpMarketLastSlotCache.set(orderParams.marketIndex, confirmation.context.slot);
+    return sig;
   }
 
   private async tryMakeJitAuctionForMarket(market: PerpMarketAccount) {
