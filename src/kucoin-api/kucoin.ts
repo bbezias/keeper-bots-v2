@@ -41,7 +41,7 @@ export class KucoinController extends EventEmitter {
     for (const [symbol, value] of Object.entries(this.handlers)) {
       if (value.lastRcv + 10000 < now) {
         value.ready = false;
-        if (this.api.ws.ws.readyState === ReconnectingWebSocket.OPEN) {
+        if (this.api.ws && this.api.ws.ws.readyState === ReconnectingWebSocket.OPEN) {
           logger.warn(`Websocket subscription seems lost for ${symbol}, trying to resubscribe`);
           try {
             await this.subscribe(symbol);
