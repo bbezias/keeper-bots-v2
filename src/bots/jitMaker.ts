@@ -988,7 +988,10 @@ export class JitMakerBot implements Bot {
           logger.info(`${idx} - Virtual PnL: $ ${virtualPnL.toFixed(2)} / ${(virtualPnLRel * 100).toFixed(2)}%`);
 
           const offeredPriceBn = new BN(offeredPrice * PRICE_PRECISION.toNumber());
-          if (this.takingPositionMutex.isLocked()) continue;
+          if (this.takingPositionMutex.isLocked()) {
+            logger.info(`${idx} - ❌ Client is locked - skipping`);
+            continue;
+          }
           const release = await this.takingPositionMutex.acquire();
           try {
 
@@ -1000,7 +1003,7 @@ export class JitMakerBot implements Bot {
               node: nodeToFill.node,
             }, idx);
 
-            logger.info(`${idx} - ✅ JIT auction filled (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}), Tx: ${txSig}`);
+            logger.info(`${idx} - ✅ JIT auction submitted (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}), Tx: ${txSig}`);
           } catch (e) {
             nodeToFill.node.haveFilled = false;
 
@@ -1099,6 +1102,10 @@ export class JitMakerBot implements Bot {
       blockhash: latestBlockhash.blockhash,
       lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
     }, 'confirmed');
+
+    if (confirmation.value && confirmation.value.err) {
+      throw confirmation.value.err;
+    }
 
     this.driftClient.perpMarketLastSlotCache.set(orderParams.marketIndex, confirmation.context.slot);
     return sig;
