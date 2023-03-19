@@ -5,17 +5,15 @@ services:
     build: .
     image: filler-bot
     ports:
-      - "9464:9464"
+      - "9464"
       - "3040"
     restart: unless-stopped
-    command: sh -c "yarn run dev:filler --websocket"
+    command: sh -c "yarn run dev --config-file config.yaml"
     environment:
-      - KEEPER_PRIVATE_KEY=./ids/.id.json
-      - ENDPOINT=http://165.140.86.78:8899
-      - METRICS_PORT=3040
-      - SUB_CLIENT_ID=0
+      - ENV=mainnet-beta
     volumes:
       - ./ids:/app/ids
+      - ./config.yaml:/app/config.yaml
     logging:
       options:
         max-size: "10m"
