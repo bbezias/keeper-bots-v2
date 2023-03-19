@@ -156,6 +156,8 @@ export class SpotFillerBot implements Bot {
 	private userMapMutex = new Mutex();
 	private userMap: UserMap;
 	private userStatsMap: UserStatsMap;
+	private lastSeenNumberOfSubAccounts: number;
+	private lastSeenNumberOfAuthorities: number;
 
 	private serumFulfillmentConfigMap: SerumFulfillmentConfigMap;
 	private serumSubscribers: Map<number, SerumSubscriber>;
@@ -433,6 +435,13 @@ export class SpotFillerBot implements Bot {
 
 				await this.userMap.fetchAllUsers();
 				await this.userStatsMap.fetchAllUserStats();
+
+				this.lastSeenNumberOfSubAccounts = this.driftClient
+					.getStateAccount()
+					.numberOfSubAccounts.toNumber();
+				this.lastSeenNumberOfAuthorities = this.driftClient
+					.getStateAccount()
+					.numberOfAuthorities.toNumber();
 			})
 		);
 
@@ -500,8 +509,10 @@ export class SpotFillerBot implements Bot {
 
 		const stateAccount = this.driftClient.getStateAccount();
 		const userMapResyncRequired =
-			this.userMap.size() !== stateAccount.numberOfSubAccounts.toNumber() ||
-			this.userStatsMap.size() !== stateAccount.numberOfAuthorities.toNumber();
+			this.lastSeenNumberOfSubAccounts !==
+				stateAccount.numberOfSubAccounts.toNumber() ||
+			this.lastSeenNumberOfAuthorities !==
+				stateAccount.numberOfAuthorities.toNumber();
 
 		if (userMapResyncRequired) {
 			logger.warn(
@@ -555,8 +566,10 @@ export class SpotFillerBot implements Bot {
 	private async resyncUserMapsIfRequired() {
 		const stateAccount = this.driftClient.getStateAccount();
 		const resyncRequired =
-			this.userMap.size() !== stateAccount.numberOfSubAccounts.toNumber() ||
-			this.userStatsMap.size() !== stateAccount.numberOfAuthorities.toNumber();
+			this.lastSeenNumberOfSubAccounts !==
+				stateAccount.numberOfSubAccounts.toNumber() ||
+			this.lastSeenNumberOfAuthorities !==
+				stateAccount.numberOfAuthorities.toNumber();
 
 		if (resyncRequired) {
 			await this.lastSlotReyncUserMapsMutex.runExclusive(async () => {
@@ -585,29 +598,17 @@ export class SpotFillerBot implements Bot {
 
 				if (doResync) {
 					logger.info(`Resyncing UserMap`);
-					const newUserMap = new UserMap(
-						this.driftClient,
-						this.driftClient.userAccountSubscriptionConfig
-					);
-					const newUserStatsMap = new UserStatsMap(
-						this.driftClient,
-						this.userStatsMapSubscriptionConfig
-					);
-					newUserMap.fetchAllUsers().then(() => {
-						newUserStatsMap
-							.fetchAllUserStats()
+					this.userMap.sync(false).then(() => {
+						this.userStatsMap
+							.sync()
 							.then(async () => {
 								await this.userMapMutex.runExclusive(async () => {
-									for (const user of this.userMap.values()) {
-										await user.unsubscribe();
-									}
-									for (const user of this.userStatsMap.values()) {
-										await user.unsubscribe();
-									}
-									delete this.userMap;
-									delete this.userStatsMap;
-									this.userMap = newUserMap;
-									this.userStatsMap = newUserStatsMap;
+									this.lastSeenNumberOfSubAccounts = this.driftClient
+										.getStateAccount()
+										.numberOfSubAccounts.toNumber();
+									this.lastSeenNumberOfAuthorities = this.driftClient
+										.getStateAccount()
+										.numberOfAuthorities.toNumber();
 								});
 							})
 							.finally(() => {

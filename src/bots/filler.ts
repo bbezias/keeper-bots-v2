@@ -89,6 +89,7 @@ const dlobMutexError = new Error('dlobMutex timeout');
 
 const errorCodesToSuppress = [
 	6081, // 0x17c1 Error Number: 6081. Error Message: MarketWrongMutability.
+	6239, // 0x185F Error Number: 6239. Error Message: RevertFill.
 ];
 
 enum METRIC_TYPES {
@@ -164,7 +165,8 @@ export class FillerBot implements Bot {
 	private userStatsMapSubscriptionConfig: UserSubscriptionConfig;
 	private driftClient: DriftClient;
 	private pollingIntervalMs: number;
-	private transactionVersion: number | undefined;
+	private transactionVersion?: number;
+	private revertOnFailure?: boolean;
 	private lookupTableAccount: AddressLookupTableAccount;
 
 	private dlobMutex = withTimeout(
@@ -177,6 +179,8 @@ export class FillerBot implements Bot {
 	private userMapMutex = new Mutex();
 	private userMap: UserMap;
 	private userStatsMap: UserStatsMap;
+	private lastSeenNumberOfSubAccounts: number;
+	private lastSeenNumberOfAuthorities: number;
 
 	private periodicTaskMutex = new Mutex();
 
@@ -252,6 +256,9 @@ export class FillerBot implements Bot {
 		logger.info(
 			`${this.name}: using transactionVersion: ${this.transactionVersion}`
 		);
+
+		this.revertOnFailure = config.revertOnFailure ?? true;
+		logger.info(`${this.name}: revertOnFailure: ${this.revertOnFailure}`);
 	}
 
 	private initializeMetrics() {
@@ -440,8 +447,16 @@ export class FillerBot implements Bot {
 				this.userStatsMapSubscriptionConfig
 			);
 
-			await this.userMap.fetchAllUsers();
+			await this.userMap.fetchAllUsers(false);
+			console.log('initial userMap size', this.userMap.size());
 			await this.userStatsMap.fetchAllUserStats();
+
+			this.lastSeenNumberOfSubAccounts = this.driftClient
+				.getStateAccount()
+				.numberOfSubAccounts.toNumber();
+			this.lastSeenNumberOfAuthorities = this.driftClient
+				.getStateAccount()
+				.numberOfAuthorities.toNumber();
 		});
 
 		this.lookupTableAccount =
@@ -476,8 +491,10 @@ export class FillerBot implements Bot {
 
 		const stateAccount = this.driftClient.getStateAccount();
 		const userMapResyncRequired =
-			this.userMap.size() !== stateAccount.numberOfSubAccounts.toNumber() ||
-			this.userStatsMap.size() !== stateAccount.numberOfAuthorities.toNumber();
+			this.lastSeenNumberOfSubAccounts !==
+				stateAccount.numberOfSubAccounts.toNumber() ||
+			this.lastSeenNumberOfAuthorities !==
+				stateAccount.numberOfAuthorities.toNumber();
 		if (userMapResyncRequired) {
 			logger.warn(
 				`${
@@ -537,8 +554,10 @@ export class FillerBot implements Bot {
 	private async resyncUserMapsIfRequired() {
 		const stateAccount = this.driftClient.getStateAccount();
 		const resyncRequired =
-			this.userMap.size() !== stateAccount.numberOfSubAccounts.toNumber() ||
-			this.userStatsMap.size() !== stateAccount.numberOfAuthorities.toNumber();
+			this.lastSeenNumberOfSubAccounts !==
+				stateAccount.numberOfSubAccounts.toNumber() ||
+			this.lastSeenNumberOfAuthorities !==
+				stateAccount.numberOfAuthorities.toNumber();
 
 		if (resyncRequired) {
 			await this.lastSlotReyncUserMapsMutex.runExclusive(async () => {
@@ -567,30 +586,23 @@ export class FillerBot implements Bot {
 
 				if (doResync) {
 					logger.info(`Resyncing UserMap`);
-					const newUserMap = new UserMap(
-						this.driftClient,
-						this.driftClient.userAccountSubscriptionConfig
-					);
-					const newUserStatsMap = new UserStatsMap(
-						this.driftClient,
-						this.userStatsMapSubscriptionConfig
-					);
-					newUserMap.fetchAllUsers().then(() => {
-						newUserStatsMap
-							.fetchAllUserStats()
+					const userMapSizeBefore = this.userMap.size();
+					const userStatsMapSizeBefore = this.userStatsMap.size();
+					this.userMap.sync(false).then(() => {
+						this.userStatsMap
+							.sync()
 							.then(async () => {
 								await this.userMapMutex.runExclusive(async () => {
-									for (const user of this.userMap.values()) {
-										await user.unsubscribe();
-									}
-									for (const user of this.userStatsMap.values()) {
-										await user.unsubscribe();
-									}
-									delete this.userMap;
-									delete this.userStatsMap;
+									const usersAdded = this.userMap.size() - userMapSizeBefore;
+									console.log('users added', usersAdded);
+									const userStatsAdded =
+										this.userStatsMap.size() - userStatsMapSizeBefore;
+									console.log('user stats added', userStatsAdded);
 
-									this.userMap = newUserMap;
-									this.userStatsMap = newUserStatsMap;
+									this.lastSeenNumberOfSubAccounts =
+										stateAccount.numberOfSubAccounts.toNumber();
+									this.lastSeenNumberOfAuthorities =
+										stateAccount.numberOfAuthorities.toNumber();
 								});
 							})
 							.finally(() => {
@@ -1261,6 +1273,7 @@ export class FillerBot implements Bot {
 			ixs.push(ix);
 			runningTxSize += newIxCost + additionalAccountsCost;
 			runningCUUsed += cuToUsePerFill;
+
 			newAccounts.forEach((key) => uniqueAccounts.add(key.toString()));
 			idxUsed++;
 			nodesSent.push(nodeToFill);
@@ -1279,6 +1292,10 @@ export class FillerBot implements Bot {
 				Date.now() - txPackerStart
 			}ms`
 		);
+
+		if (this.revertOnFailure) {
+			ixs.push(await this.driftClient.getRevertFillIx());
+		}
 
 		let txResp: Promise<TxSigAndSlot>;
 		const txStart = Date.now();
