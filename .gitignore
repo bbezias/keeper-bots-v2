@@ -147,3 +147,4 @@ config.yaml
 /config-jit-maker.yaml
 config-liquidator.yaml
 config-filler-spot.yaml
+/config-testing.yaml

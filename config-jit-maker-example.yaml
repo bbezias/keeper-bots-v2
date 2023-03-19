@@ -48,6 +48,9 @@ enabledBots:
   # Example maker bot that participates in JIT auction (caution: you will probably lose money)
   - jitMaker
 
+  # Example maker bot that participates in JIT auction (caution: you will probably lose money)
+  # - testingBot
+
   # Example maker bot that posts floating oracle orders
   # - floatingMaker
 

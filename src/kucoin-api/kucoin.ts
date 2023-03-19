@@ -66,7 +66,7 @@ export class KucoinController extends EventEmitter {
       this.handlers[symbol] = { lastRcv: 0, ready: false };
     }
 
-    if (!this.api.ws.ws || this.api.ws.ws.readyState === ReconnectingWebSocket.OPEN) {
+    if (!this.api.ws.ws || this.api.ws.ws.readyState !== ReconnectingWebSocket.OPEN) {
       throw new Error("First you need to open the socket");
     }
 

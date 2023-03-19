@@ -57,6 +57,7 @@ import {
 	loadConfigFromFile,
 	loadConfigFromOpts,
 } from './config';
+import { TestingBot } from './bots/testingBot';
 
 require('dotenv').config();
 const driftEnv = (process.env.ENV || 'devnet') as DriftEnv;
@@ -77,6 +78,7 @@ program
 	.option('--spot-filler', 'Enable spot filler bot')
 	.option('--trigger', 'Enable trigger bot')
 	.option('--jit-maker', 'Enable JIT auction maker bot')
+	.option('--testing-bot', 'Enable Testing bot')
 	.option('--floating-maker', 'Enable floating maker bot')
 	.option('--liquidator', 'Enable liquidator bot')
 	.option('--if-revenue-settler', 'Enable Insurance Fund PnL settler bot')
@@ -597,6 +599,23 @@ const runBot = async () => {
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
 				config.botConfigs.jitMaker
+			)
+		);
+	}
+
+	if (configHasBot(config, 'testingBot')) {
+		bots.push(
+			new TestingBot(
+				driftClient,
+				slotSubscriber,
+				{
+					rpcEndpoint: endpoint,
+					commit: commitHash,
+					driftEnv: driftEnv,
+					driftPid: driftPublicKey.toBase58(),
+					walletAuthority: wallet.publicKey.toBase58(),
+				},
+				config.botConfigs.testingBot
 			)
 		);
 	}

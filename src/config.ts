@@ -34,6 +34,10 @@ export type JitMakerConfig = BaseBotConfig & {
 	}
 };
 
+export type TestingBotConfig = BaseBotConfig & {
+
+};
+
 export type BotConfigMap = {
 	filler?: FillerConfig;
 	spotFiller?: FillerConfig;
@@ -41,6 +45,7 @@ export type BotConfigMap = {
 	liquidator?: LiquidatorConfig;
 	floatingMaker?: BaseBotConfig;
 	jitMaker?: JitMakerConfig;
+	testingBot?: TestingBotConfig;
 	ifRevenueSettler?: BaseBotConfig;
 	userPnlSettler?: BaseBotConfig;
 };
@@ -217,6 +222,14 @@ export function loadConfigFromOpts(opts: any): Config {
 			maxPositionExposure: opts.maxPositionExposure ?? 0.1,
 			profitThreshold: opts.profitThreshold ?? 0.0025,
 			profitThresholdIfReduce: opts.profitThresholdIfReduce ?? 0.0005
+		};
+	}
+	if (opts.testingBot) {
+		config.enabledBots.push('testingBot');
+		config.botConfigs.testingBot = {
+			dryRun: opts.dryRun ?? false,
+			botId: process.env.BOT_ID ?? 'testingBot',
+			metricsPort: 9468,
 		};
 	}
 	if (opts.ifRevenueSettler) {

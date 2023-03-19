@@ -541,6 +541,8 @@ export class JitMakerBot implements Bot {
     this.isActive = true;
 
     await this.userMap.fetchAllUsers();
+
+    logger.info(`Fetch all user done`);
   }
 
   public async reset() {
