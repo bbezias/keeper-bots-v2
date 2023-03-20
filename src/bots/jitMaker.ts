@@ -19,7 +19,7 @@ import {
   UserMap,
   UserStatsMap,
   getOrderSignature,
-  MarketType, PostOnlyParams, calculateBidAskPrice, Wallet,
+  MarketType, PostOnlyParams, calculateBidAskPrice, Wallet, ZERO,
 } from '@drift-labs/sdk';
 import { Mutex, tryAcquire, withTimeout, E_ALREADY_LOCKED } from 'async-mutex';
 
@@ -164,7 +164,7 @@ class MaxSizeList {
 export class JitMakerBot implements Bot {
   public readonly name: string;
   public readonly dryRun: boolean;
-  public readonly defaultIntervalMs: number = 1000;
+  public readonly defaultIntervalMs: number = 500;
 
   private driftClient: DriftClient;
   private slotSubscriber: SlotSubscriber;
@@ -241,6 +241,13 @@ export class JitMakerBot implements Bot {
   };
   private futureKucoinContract: { [id: number]: Contract } = {};
   private coolingPeriod: { [id: number]: number } = {
+    0: 0,
+    1: 0,
+    2: 0,
+    3: 0,
+    5: 0
+  };
+  private coolingHedgingPeriod: { [id: number]: number } = {
     0: 0,
     1: 0,
     2: 0,
@@ -505,7 +512,8 @@ export class JitMakerBot implements Bot {
       const marketIndex = SYMBOL_TO_INDEX[r.symbol];
       if (marketIndex === undefined) return;
       this.positionKucoin[marketIndex] = r.currentQty;
-      logger.info(`currentQty ${r.symbol}: ${r.currentQty * this.futureKucoinContract[marketIndex].multiplier}`);
+      const name = INDEX_TO_NAME[r.symbol];
+      logger.info(`${name}: currentQty ${r.currentQty * this.futureKucoinContract[marketIndex].multiplier}`);
     });
 
     this.kucoin.on('order', (r: Order) => {
@@ -667,6 +675,7 @@ export class JitMakerBot implements Bot {
 
       const x = this.driftClient.getUserAccount().perpPositions;
       const positionOnDrift: { [id: number]: number } = { 0: 0, 1: 0, 2: 0, 3: 0, 5: 0 };
+      const perpPositions: { [id: number]: undefined | PerpPosition } = { 0: undefined, 1: undefined, 2: undefined, 3: undefined, 5: undefined };
 
       for await (const p of x) {
 
@@ -676,9 +685,36 @@ export class JitMakerBot implements Bot {
           positionOnDrift[p.marketIndex] += Math.round(baseValue / multiplier);
         }
 
-        if (p.baseAssetAmount.isZero()) {
-          continue;
+        if (p.marketIndex === 0 || p.marketIndex === 1 || p.marketIndex === 2 || p.marketIndex === 3 || p.marketIndex === 5) {
+          if (!perpPositions[p.marketIndex] && !p.baseAssetAmount.eq(ZERO)) {
+            perpPositions[p.marketIndex] = p;
+          }
         }
+      }
+
+      for (const i of [0, 1, 2, 3, 5]) {
+        const p = perpPositions[i];
+        if (!p) continue;
+        const perpPosition = this.agentState.perpMarketPosition.get(p.marketIndex);
+
+        if (perpPosition && p.baseAssetAmount.eq(perpPosition.baseAssetAmount)) continue;
+
+        const baseValue = convertToNumber(p.baseAssetAmount, BASE_PRECISION);
+        const previousBaseValue = perpPosition ? convertToNumber(perpPosition.baseAssetAmount, BASE_PRECISION) : 0;
+        const name = INDEX_TO_NAME[p.marketIndex];
+
+        // check if we need to enter a closing state
+        const accountCollateral = convertToNumber(
+          this.driftClient.getUser().getTotalCollateral(),
+          QUOTE_PRECISION
+        );
+        const positionValue = convertToNumber(
+          p.quoteAssetAmount,
+          QUOTE_PRECISION
+        );
+
+        const exposure = Math.abs(positionValue / accountCollateral);
+        logger.info(`${name} - Drift Position has changed from ${previousBaseValue.toPrecision(4)} to ${baseValue.toPrecision(4)} - New Exposure ${(exposure * 100).toPrecision(2)}`);
 
         // update current position based on market position
         this.agentState.perpMarketPosition.set(p.marketIndex, p);
@@ -690,103 +726,89 @@ export class JitMakerBot implements Bot {
           currentState = StateType.NEUTRAL;
         }
 
-        let canUpdateStateBasedOnPosition = true;
-        if (
-          (currentState === StateType.CLOSING_LONG &&
-            p.baseAssetAmount.gt(new BN(0))) ||
-          (currentState === StateType.CLOSING_SHORT &&
-            p.baseAssetAmount.lt(new BN(0)))
-        ) {
-          canUpdateStateBasedOnPosition = false;
+        if (currentState === StateType.CLOSING_LONG && p.baseAssetAmount.gt(new BN(0))) {
+          logger.info(`${name} - Drift state remains "closing_long"`);
+        } else if (currentState === StateType.CLOSING_SHORT && p.baseAssetAmount.lt(new BN(0))) {
+          logger.info(`${name} - Drift state remains "closing_short"`);
+        } else if (exposure >= this.MAX_POSITION_EXPOSURE && p.baseAssetAmount.lt(new BN(0))) {
+          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "closing_short"`);
+          this.agentState.stateType.set(
+            p.marketIndex,
+            StateType.CLOSING_SHORT
+          );
+        } else if (exposure >= this.MAX_POSITION_EXPOSURE && p.baseAssetAmount.gt(new BN(0))) {
+          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "closing_long"`);
+          this.agentState.stateType.set(
+            p.marketIndex,
+            StateType.CLOSING_LONG
+          );
+        } else if (p.baseAssetAmount.gt(new BN(0))) {
+          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "long"`);
+          this.agentState.stateType.set(p.marketIndex, StateType.LONG);
+        } else if (p.baseAssetAmount.lt(new BN(0))) {
+          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "short"`);
+          this.agentState.stateType.set(p.marketIndex, StateType.SHORT);
+        } else {
+          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "neutral"`);
+          this.agentState.stateType.set(p.marketIndex, StateType.NEUTRAL);
         }
 
-        if (canUpdateStateBasedOnPosition) {
-          // check if need to enter a closing state
-          const accountCollateral = convertToNumber(
-            this.driftClient.getUser().getTotalCollateral(),
-            QUOTE_PRECISION
-          );
-          const positionValue = convertToNumber(
-            p.quoteAssetAmount,
-            QUOTE_PRECISION
-          );
+        if (this.isActive) {
 
-          const exposure = positionValue / accountCollateral;
-
-          if (exposure >= this.MAX_POSITION_EXPOSURE) {
-            // state becomes closing only
-            if (p.baseAssetAmount.gt(new BN(0))) {
-              this.agentState.stateType.set(
-                p.marketIndex,
-                StateType.CLOSING_LONG
-              );
-            } else {
-              this.agentState.stateType.set(
-                p.marketIndex,
-                StateType.CLOSING_SHORT
-              );
-            }
-          } else {
-            // update state to be whatever our current position is
-            if (p.baseAssetAmount.gt(new BN(0))) {
-              this.agentState.stateType.set(p.marketIndex, StateType.LONG);
-            } else if (p.baseAssetAmount.lt(new BN(0))) {
-              this.agentState.stateType.set(p.marketIndex, StateType.SHORT);
-            } else {
-              this.agentState.stateType.set(p.marketIndex, StateType.NEUTRAL);
+          const allowedMarketIndices = [0, 1, 2, 3, 5];
+          for (const i of allowedMarketIndices) {
+            const driftPosition = positionOnDrift[i];
+            const kucoinPosition = this.positionKucoin[i];
+            const symbol = INDEX_TO_SYMBOL[i];
+            const delta = driftPosition + kucoinPosition;
+            const now = (new Date()).getTime();
+            if (delta !== 0 && this.coolingHedgingPeriod[i] < now) {
+              const clientOid = `${symbol}-${(new Date()).getTime()}`;
+              const side = delta > 0 ? 'sell' : 'buy';
+              this.coolingHedgingPeriod[i] = now + 5000;
+              if (!this.dryRun) {
+                this.kucoin.api.placeMarketOrder({
+                  symbol,
+                  size: Math.abs(delta),
+                  side: side,
+                  clientOid,
+                  leverage: 10
+                }).then(r => {
+                  if (r.code === "200000") {
+                    logger.info(`✅ Hedge placed successfully ${r.data.orderId}`);
+                  } else {
+                    logger.error("Error hedging the position");
+                    console.log(r);
+                  }
+                }).catch(e => {
+                  logger.error(`Error buying hedge on kucoin: ${e}`);
+                });
+              } else {
+                logger.info(`✅ Dry run - Hedge placed successfully`);
+              }
+              logger.info(`Hedging ${symbol} Open position, taking order ${side} ${Math.abs(delta)}`);
             }
           }
         }
       }
-
-      if (this.isActive) {
-
-        const allowedMarketIndices = [0, 1, 2, 3, 5];
-        for (const i of allowedMarketIndices) {
-          const driftPosition = positionOnDrift[i];
-          const kucoinPosition = this.positionKucoin[i];
-          const symbol = INDEX_TO_SYMBOL[i];
-          const delta = driftPosition + kucoinPosition;
-          const now = (new Date()).getTime();
-          if (delta !== 0 && this.coolingPeriod[i] < now) {
-            const clientOid = `${symbol}-${(new Date()).getTime()}`;
-            const side = delta > 0 ? 'sell' : 'buy';
-            this.coolingPeriod[i] = now + 5000;
-            if (!this.dryRun) {
-              this.kucoin.api.placeMarketOrder({
-                symbol,
-                size: Math.abs(delta),
-                side: side,
-                clientOid,
-                leverage: 10
-              }).then(r => {
-                if (r.code === "200000") {
-                  logger.info(`✅ Hedge placed successfully ${r.data.orderId}`);
-                } else {
-                  logger.error("Error hedging the position");
-                  console.log(r);
-                }
-              }).catch(e => {
-                logger.error(`Error buying hedge on kucoin: ${e}`);
-              });
-            } else {
-              logger.info(`✅ Dry run - Hedge placed successfully`);
-            }
-            logger.info(`Hedging ${symbol} Open position, taking order ${side} ${Math.abs(delta)}`);
-          }
-        }
-      }
-
-    } catch (e) {
+    } catch
+      (e) {
       logger.error(`Uncaught error in Update agent state`);
       console.log(e);
     }
   }
 
-  private nodeCanBeFilled(
-    node: DLOBNode,
-    userAccountPublicKey: PublicKey
-  ): boolean {
+  private
+
+  nodeCanBeFilled(
+    node
+      :
+      DLOBNode,
+    userAccountPublicKey
+      :
+      PublicKey
+  ):
+    boolean {
     if (node.haveFilled) {
       logger.error(
         `already made the JIT auction for ${node.userAccount} - ${node.order.orderId}`
@@ -814,7 +836,10 @@ export class JitMakerBot implements Bot {
    * Draws an action based on the current state of the bot.
    *
    */
-  private async drawAndExecuteAction(market: PerpMarketAccount) {
+  private async drawAndExecuteAction(market
+                         :
+                         PerpMarketAccount
+  ) {
 
     const marketIndex = market.marketIndex;
     try {
@@ -949,7 +974,6 @@ export class JitMakerBot implements Bot {
         const currSlot = this.slotSubscriber.getSlot();
         const aucDur = nodeToFill.node.order.auctionDuration;
         const aucEnd = orderSlot + aucDur;
-        const isTestingAccount = nodeToFill.node.userAccount.toBase58() === 'kmLtQsL8cJqmopn2j8GWRHJg9jeQuzdRAf7BJEJ3kDX';
         let pt = this.profitThreshold;
         let takePosition = false;
         let offeredPrice = 0;
@@ -966,9 +990,6 @@ export class JitMakerBot implements Bot {
           positionOnDrift = 'long';
           if (acceptablePrice >= endPrice) {
             takePosition = true;
-          } else if (isTestingAccount) {
-            takePosition = true;
-            offeredPrice = startPrice;
           } else {
             virtualPnLRel = bestAskUsdc / endPrice - 1 - this.kucoinTakerFee;
           }
@@ -981,9 +1002,6 @@ export class JitMakerBot implements Bot {
           positionOnDrift = 'short';
           if (acceptablePrice <= endPrice) {
             takePosition = true;
-          } else if (isTestingAccount) {
-            takePosition = true;
-            offeredPrice = startPrice;
           } else {
             virtualPnLRel = endPrice / bestBidUsdc - 1 - this.kucoinTakerFee;
           }
@@ -998,11 +1016,12 @@ export class JitMakerBot implements Bot {
 
         if (currSlot >= aucEnd) {
           logger.warn(`${idx} - Processing error too late delta between curr slot and aucEnd: ${currSlot - aucEnd}`);
+          continue;
         }
 
         logger.debug(`${idx} - aucend - currslot ${aucEnd - currSlot}`);
 
-        if (takePosition || isTestingAccount) {
+        if (takePosition) {
           logger.info(`${idx} - Bidding this auction ${positionOnDrift} at: ${offeredPrice.toFixed(4)}, hedge on Kucoin for ${bestKucoinValue}`);
           logger.info(`${idx} - Virtual PnL: $ ${virtualPnL.toFixed(2)} / ${(virtualPnLRel * 100).toFixed(2)}%`);
 
@@ -1011,6 +1030,12 @@ export class JitMakerBot implements Bot {
             logger.info(`${idx} - ❌ Client is locked - skipping`);
             continue;
           }
+
+          if (this.coolingPeriod[marketIndex] > new Date().getTime()) {
+            logger.info(`${idx} - ❌ Still in cooling period - skipping`);
+            continue;
+          }
+
           const release = await this.takingPositionMutex.acquire();
           try {
 
@@ -1022,6 +1047,7 @@ export class JitMakerBot implements Bot {
               node: nodeToFill.node,
             }, idx);
 
+            this.coolingPeriod[marketIndex] = new Date().getTime() + 6000;
             logger.info(`${idx} - ✅ JIT auction submitted (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}), Tx: ${txSig}`);
           } catch (e) {
             nodeToFill.node.haveFilled = false;
@@ -1059,7 +1085,13 @@ export class JitMakerBot implements Bot {
     }
   }
 
-  private async executeAction(action: Action, tradeIdx: number): Promise<TransactionSignature> {
+  private async executeAction(action
+                  :
+                  Action, tradeIdx
+                  :
+                  number
+  ):
+    Promise<TransactionSignature> {
 
     const t1 = (new Date()).getTime();
     const takerUserAccount = (
@@ -1119,7 +1151,9 @@ export class JitMakerBot implements Bot {
 
     logger.info(`${tradeIdx} - Sending transaction...`);
 
-    if (!this.dryRun) {
+    if (!
+      this.dryRun
+    ) {
       const sig = await connection.sendTransaction(transaction, { maxRetries: 2 });
 
       logger.info(`${tradeIdx} - Transaction sent, pending confirmation, sig ${sig}`);
@@ -1142,7 +1176,42 @@ export class JitMakerBot implements Bot {
     }
   }
 
-  private async tryMakeJitAuctionForMarket(market: PerpMarketAccount) {
+  private checkDirectArbitrage(book
+                         :
+                         OrderBook, marketIndex
+                         :
+                         number
+  ) {
+    const [bid, ask] = calculateBidAskPrice(
+      this.driftClient.getPerpMarketAccount(marketIndex).amm,
+      this.driftClient.getOracleDataForPerpMarket(marketIndex)
+    );
+    const driftBid = convertToNumber(bid, PRICE_PRECISION);
+    const driftAsk = convertToNumber(ask, PRICE_PRECISION);
+
+    const kucoinBid = book.bestBid(this.maxTradeSize[marketIndex]);
+    const kucoinAsk = book.bestAsk(this.maxTradeSize[marketIndex]);
+
+    if (this.exchangeDelta[marketIndex] === 0) {
+      return;
+    }
+
+    const factor = this.exchangeDelta[marketIndex];
+
+    const kucoinAskAdjusted = kucoinAsk / factor;
+    const kucoinBidAdjusted = kucoinBid / factor;
+
+    // if (driftBid / kucoinAskAdjusted - 1) {
+    //
+    // } else if (kucoinBidAdjusted / driftBid - 1 > ) {
+    //
+    // }
+  }
+
+  private async tryMakeJitAuctionForMarket(market
+                               :
+                               PerpMarketAccount
+  ) {
     await this.updateAgentState();
     await this.drawAndExecuteAction(market);
   }
