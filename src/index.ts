@@ -691,81 +691,81 @@ const runBot = async () => {
 	});
 
 	// start http server listening to /health endpoint using http package
-	http
-		.createServer(async (req, res) => {
-			if (req.url === '/health') {
-				if (config.global.testLiveness) {
-					if (Date.now() > startupTime + 60 * 1000) {
-						res.writeHead(500);
-						res.end('Testing liveness test fail');
-						return;
-					}
-				}
-
-				if (config.global.websocket) {
-					/* @ts-ignore */
-					if (!driftClient.connection._rpcWebSocketConnected) {
-						logger.error(`Connection rpc websocket disconnected`);
-						res.writeHead(500);
-						res.end(`Connection rpc websocket disconnected`);
-						return;
-					}
-				}
-
-				// check if a slot was received recently
-				let healthySlotSubscriber = false;
-				await lastSlotReceivedMutex.runExclusive(async () => {
-					healthySlotSubscriber = lastSlotReceived > lastHealthCheckSlot;
-					logger.debug(
-						`Health check: lastSlotReceived: ${lastSlotReceived}, lastHealthCheckSlot: ${lastHealthCheckSlot}, healthySlot: ${healthySlotSubscriber}`
-					);
-					if (healthySlotSubscriber) {
-						lastHealthCheckSlot = lastSlotReceived;
-					}
-				});
-				if (!healthySlotSubscriber) {
-					res.writeHead(501);
-					logger.error(`SlotSubscriber is not healthy`);
-					res.end(`SlotSubscriber is not healthy`);
-					return;
-				}
-
-				if (bulkAccountLoader) {
-					// we expect health checks to happen at a rate slower than the BulkAccountLoader's polling frequency
-					if (
-						lastBulkAccountLoaderSlot &&
-						bulkAccountLoader.mostRecentSlot === lastBulkAccountLoaderSlot
-					) {
-						res.writeHead(502);
-						res.end(`bulkAccountLoader.mostRecentSlot is not healthy`);
-						logger.error(
-							`Health check failed due to stale bulkAccountLoader.mostRecentSlot`
-						);
-						return;
-					}
-					lastBulkAccountLoaderSlot = bulkAccountLoader.mostRecentSlot;
-				}
-
-				// check all bots if they're live
-				for (const bot of bots) {
-					const healthCheck = await promiseTimeout(bot.healthCheck(), 1000);
-					if (!healthCheck) {
-						logger.error(`Health check failed for bot ${bot.name}`);
-						res.writeHead(503);
-						res.end(`Bot ${bot.name} is not healthy`);
-						return;
-					}
-				}
-
-				// liveness check passed
-				res.writeHead(200);
-				res.end('OK');
-			} else {
-				res.writeHead(404);
-				res.end('Not found');
-			}
-		})
-		.listen(healthCheckPort);
+	// http
+	// 	.createServer(async (req, res) => {
+	// 		if (req.url === '/health') {
+	// 			if (config.global.testLiveness) {
+	// 				if (Date.now() > startupTime + 60 * 1000) {
+	// 					res.writeHead(500);
+	// 					res.end('Testing liveness test fail');
+	// 					return;
+	// 				}
+	// 			}
+	//
+	// 			if (config.global.websocket) {
+	// 				/* @ts-ignore */
+	// 				if (!driftClient.connection._rpcWebSocketConnected) {
+	// 					logger.error(`Connection rpc websocket disconnected`);
+	// 					res.writeHead(500);
+	// 					res.end(`Connection rpc websocket disconnected`);
+	// 					return;
+	// 				}
+	// 			}
+	//
+	// 			// check if a slot was received recently
+	// 			let healthySlotSubscriber = false;
+	// 			await lastSlotReceivedMutex.runExclusive(async () => {
+	// 				healthySlotSubscriber = lastSlotReceived > lastHealthCheckSlot;
+	// 				logger.debug(
+	// 					`Health check: lastSlotReceived: ${lastSlotReceived}, lastHealthCheckSlot: ${lastHealthCheckSlot}, healthySlot: ${healthySlotSubscriber}`
+	// 				);
+	// 				if (healthySlotSubscriber) {
+	// 					lastHealthCheckSlot = lastSlotReceived;
+	// 				}
+	// 			});
+	// 			if (!healthySlotSubscriber) {
+	// 				res.writeHead(501);
+	// 				logger.error(`SlotSubscriber is not healthy`);
+	// 				res.end(`SlotSubscriber is not healthy`);
+	// 				return;
+	// 			}
+	//
+	// 			if (bulkAccountLoader) {
+	// 				// we expect health checks to happen at a rate slower than the BulkAccountLoader's polling frequency
+	// 				if (
+	// 					lastBulkAccountLoaderSlot &&
+	// 					bulkAccountLoader.mostRecentSlot === lastBulkAccountLoaderSlot
+	// 				) {
+	// 					res.writeHead(502);
+	// 					res.end(`bulkAccountLoader.mostRecentSlot is not healthy`);
+	// 					logger.error(
+	// 						`Health check failed due to stale bulkAccountLoader.mostRecentSlot`
+	// 					);
+	// 					return;
+	// 				}
+	// 				lastBulkAccountLoaderSlot = bulkAccountLoader.mostRecentSlot;
+	// 			}
+	//
+	// 			// check all bots if they're live
+	// 			for (const bot of bots) {
+	// 				const healthCheck = await promiseTimeout(bot.healthCheck(), 1000);
+	// 				if (!healthCheck) {
+	// 					logger.error(`Health check failed for bot ${bot.name}`);
+	// 					res.writeHead(503);
+	// 					res.end(`Bot ${bot.name} is not healthy`);
+	// 					return;
+	// 				}
+	// 			}
+	//
+	// 			// liveness check passed
+	// 			res.writeHead(200);
+	// 			res.end('OK');
+	// 		} else {
+	// 			res.writeHead(404);
+	// 			res.end('Not found');
+	// 		}
+	// 	})
+	// 	.listen(healthCheckPort);
 	logger.info(`Health check server listening on port ${healthCheckPort}`);
 
 	if (config.global.runOnce) {

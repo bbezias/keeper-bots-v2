@@ -184,7 +184,6 @@ export class TestingBot implements Bot {
         record as OrderRecord,
         this.userMap
       );
-      await this.tryMake();
     } else if (record.eventType === 'NewUserRecord') {
       await this.userMap.mustGet((record as NewUserRecord).user.toString());
       await this.userStatsMap.mustGet(
@@ -244,6 +243,7 @@ export class TestingBot implements Bot {
             this.userMap,
             this.slotSubscriber.getSlot()
           );
+
         });
 
         await Promise.all(
