@@ -378,28 +378,33 @@ export class JitMakerBot implements Bot {
         logger.error(`Issue getting delta for ${marketIndex} - missing kucoin`);
       }
       const kucoinMid = (book._asks[0][0] + book._bids[0][0]) / 2;
+      const oraclePrice = this.driftClient.getOracleDataForPerpMarket(marketIndex);
       const [bid, ask] = calculateBidAskPrice(
         this.driftClient.getPerpMarketAccount(marketIndex).amm,
         this.driftClient.getOracleDataForPerpMarket(marketIndex)
       );
-      const formattedBidPrice = convertToNumber(bid, PRICE_PRECISION);
-      const formattedAskPrice = convertToNumber(ask, PRICE_PRECISION);
-      if (!formattedAskPrice || !formattedBidPrice) {
+      const bestAsk = this.dlob.getBestAsk(marketIndex, ask, this.slotSubscriber.getSlot(), MarketType.PERP, oraclePrice);
+      const bestBid = this.dlob.getBestBid(marketIndex, bid, this.slotSubscriber.getSlot(), MarketType.PERP, oraclePrice);
+      const formattedBestBidPrice = convertToNumber(bestBid, PRICE_PRECISION);
+      const formattedBestAskPrice = convertToNumber(bestAsk, PRICE_PRECISION);
+      if (!formattedBestAskPrice || !formattedBestBidPrice) {
         this.exchangeDelta[marketIndex] = 0;
         this.exchangeDeltaTime[marketIndex] = 0;
         logger.error(`Issue getting delta for ${marketIndex} - missing drift`);
       }
 
       const name = INDEX_TO_NAME[marketIndex];
-      const driftMid = (formattedAskPrice + formattedBidPrice) / 2;
+      const driftMid = (formattedBestAskPrice + formattedBestBidPrice) / 2;
       const value = kucoinMid / driftMid;
-      if (value < 0.95 || value > 1.05) {
+      if (value < 0.992 || value > 1.08) {
         logger.warn(`${name} Skipping new exchange delta because does not meet threshold ${value.toFixed(5)}`);
+        logger.warn(`${name} Kucoin ${book._asks[0][0].toFixed(5)} ${book._bids[0][0]}`);
+        logger.warn(`${name} Drift ${formattedBestAskPrice.toFixed(5)} ${formattedBestBidPrice.toFixed(5)}`);
       } else {
         this.deltaKucoinDrift[marketIndex].add(value);
         this.exchangeDelta[marketIndex] = this.deltaKucoinDrift[marketIndex].getAverage();
-        this.exchangeDeltaTime[marketIndex] = now + 30000;
       }
+      this.exchangeDeltaTime[marketIndex] = now + 30000;
     });
   }
 
@@ -675,7 +680,13 @@ export class JitMakerBot implements Bot {
 
       const x = this.driftClient.getUserAccount().perpPositions;
       const positionOnDrift: { [id: number]: number } = { 0: 0, 1: 0, 2: 0, 3: 0, 5: 0 };
-      const perpPositions: { [id: number]: undefined | PerpPosition } = { 0: undefined, 1: undefined, 2: undefined, 3: undefined, 5: undefined };
+      const perpPositions: { [id: number]: undefined | PerpPosition } = {
+        0: undefined,
+        1: undefined,
+        2: undefined,
+        3: undefined,
+        5: undefined
+      };
 
       for await (const p of x) {
 
@@ -837,8 +848,8 @@ export class JitMakerBot implements Bot {
    *
    */
   private async drawAndExecuteAction(market
-                         :
-                         PerpMarketAccount
+                                       :
+                                       PerpMarketAccount
   ) {
 
     const marketIndex = market.marketIndex;
@@ -1076,7 +1087,7 @@ export class JitMakerBot implements Bot {
             release();
           }
         } else {
-          logger.info(`⛔ Skip offering, acceptable price ${acceptablePrice} - Pnl would be ${(virtualPnLRel * 100).toFixed(2)}% below the limit ${(pt * 100).toFixed(2)}%`);
+          logger.info(`${idx} - ⛔ Skip offering, acceptable price ${acceptablePrice} - Pnl would be ${(virtualPnLRel * 100).toFixed(2)}% below the limit ${(pt * 100).toFixed(2)}%`);
         }
       }
     } catch (e) {
@@ -1086,10 +1097,10 @@ export class JitMakerBot implements Bot {
   }
 
   private async executeAction(action
-                  :
-                  Action, tradeIdx
-                  :
-                  number
+                                :
+                                Action, tradeIdx
+                                :
+                                number
   ):
     Promise<TransactionSignature> {
 
@@ -1177,10 +1188,10 @@ export class JitMakerBot implements Bot {
   }
 
   private checkDirectArbitrage(book
-                         :
-                         OrderBook, marketIndex
-                         :
-                         number
+                                 :
+                                 OrderBook, marketIndex
+                                 :
+                                 number
   ) {
     const [bid, ask] = calculateBidAskPrice(
       this.driftClient.getPerpMarketAccount(marketIndex).amm,
@@ -1209,8 +1220,8 @@ export class JitMakerBot implements Bot {
   }
 
   private async tryMakeJitAuctionForMarket(market
-                               :
-                               PerpMarketAccount
+                                             :
+                                             PerpMarketAccount
   ) {
     await this.updateAgentState();
     await this.drawAndExecuteAction(market);
