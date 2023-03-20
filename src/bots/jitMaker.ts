@@ -396,7 +396,7 @@ export class JitMakerBot implements Bot {
       const name = INDEX_TO_NAME[marketIndex];
       const driftMid = (formattedBestAskPrice + formattedBestBidPrice) / 2;
       const value = kucoinMid / driftMid;
-      if (value < 0.992 || value > 1.08) {
+      if (value < 0.99 || value > 1.1) {
         logger.warn(`${name} Skipping new exchange delta because does not meet threshold ${value.toFixed(5)}`);
         logger.warn(`${name} Kucoin ${book._asks[0][0].toFixed(5)} ${book._bids[0][0]}`);
         logger.warn(`${name} Drift ${formattedBestAskPrice.toFixed(5)} ${formattedBestBidPrice.toFixed(5)}`);
@@ -763,8 +763,9 @@ export class JitMakerBot implements Bot {
           logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "neutral"`);
           this.agentState.stateType.set(p.marketIndex, StateType.NEUTRAL);
         }
+      }
 
-        if (this.isActive) {
+      if (this.isActive) {
 
           const allowedMarketIndices = [0, 1, 2, 3, 5];
           for (const i of allowedMarketIndices) {
@@ -801,7 +802,6 @@ export class JitMakerBot implements Bot {
             }
           }
         }
-      }
     } catch
       (e) {
       logger.error(`Uncaught error in Update agent state`);
