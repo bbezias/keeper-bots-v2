@@ -450,7 +450,7 @@ export class JitMakerBot implements Bot {
     while (!this.kucoin.api.ws.openingTime) {
       retries += 1;
 
-      if (retries >= 5) {
+      if (retries >= 30) {
         throw Error("Could not connect to Kucoin websocket");
       }
 

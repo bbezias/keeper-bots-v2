@@ -1,0 +1,20 @@
+version: '2'
+
+services:
+  filler:
+    build: .
+    image: filler-bot
+    ports:
+      - "9464"
+      - "3040"
+    restart: unless-stopped
+    command: sh -c "yarn run dev --config-file config.yaml"
+    environment:
+      - ENV=mainnet-beta
+    volumes:
+      - ./ids:/app/ids
+      - ./config.yaml:/app/config.yaml
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
