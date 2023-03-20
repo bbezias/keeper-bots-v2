@@ -249,11 +249,11 @@ export class JitMakerBot implements Bot {
   };
 
   private deltaKucoinDrift: { [id: number]: MaxSizeList } = {
-    0: new MaxSizeList(20),
-    1: new MaxSizeList(20),
-    2: new MaxSizeList(20),
-    3: new MaxSizeList(20),
-    5: new MaxSizeList(20)
+    0: new MaxSizeList(60),
+    1: new MaxSizeList(60),
+    2: new MaxSizeList(60),
+    3: new MaxSizeList(60),
+    5: new MaxSizeList(60)
   };
 
   private exchangeDeltaTime: { [id: number]: number } = {
@@ -752,22 +752,26 @@ export class JitMakerBot implements Bot {
             const clientOid = `${symbol}-${(new Date()).getTime()}`;
             const side = delta > 0 ? 'sell' : 'buy';
             this.coolingPeriod[i] = now + 5000;
-            this.kucoin.api.placeMarketOrder({
-              symbol,
-              size: Math.abs(delta),
-              side: side,
-              clientOid,
-              leverage: 10
-            }).then(r => {
-              if (r.code === "200000") {
-                logger.info(`✅ Hedge placed successfully ${r.data.orderId}`);
-              } else {
-                logger.error("Error hedging the position");
-                console.log(r);
-              }
-            }).catch(e => {
-              logger.error(`Error buying hedge on kucoin: ${e}`);
-            });
+            if (!this.dryRun) {
+              this.kucoin.api.placeMarketOrder({
+                symbol,
+                size: Math.abs(delta),
+                side: side,
+                clientOid,
+                leverage: 10
+              }).then(r => {
+                if (r.code === "200000") {
+                  logger.info(`✅ Hedge placed successfully ${r.data.orderId}`);
+                } else {
+                  logger.error("Error hedging the position");
+                  console.log(r);
+                }
+              }).catch(e => {
+                logger.error(`Error buying hedge on kucoin: ${e}`);
+              });
+            } else {
+              logger.info(`✅ Dry run - Hedge placed successfully`);
+            }
             logger.info(`Hedging ${symbol} Open position, taking order ${side} ${Math.abs(delta)}`);
           }
         }
@@ -1115,22 +1119,27 @@ export class JitMakerBot implements Bot {
 
     logger.info(`${tradeIdx} - Sending transaction...`);
 
-    const sig = await connection.sendTransaction(transaction, { maxRetries: 2 });
+    if (!this.dryRun) {
+      const sig = await connection.sendTransaction(transaction, { maxRetries: 2 });
 
-    logger.info(`${tradeIdx} - Transaction sent, pending confirmation, sig ${sig}`);
+      logger.info(`${tradeIdx} - Transaction sent, pending confirmation, sig ${sig}`);
 
-    const confirmation = await connection.confirmTransaction({
-      signature: sig,
-      blockhash: latestBlockhash.blockhash,
-      lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-    }, 'confirmed');
+      const confirmation = await connection.confirmTransaction({
+        signature: sig,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
+      }, 'confirmed');
 
-    if (confirmation.value && confirmation.value.err) {
-      throw confirmation.value.err;
+      if (confirmation.value && confirmation.value.err) {
+        throw confirmation.value.err;
+      }
+
+      this.driftClient.perpMarketLastSlotCache.set(orderParams.marketIndex, confirmation.context.slot);
+      return sig;
+    } else {
+      logger.info(`${tradeIdx} - Transaction sent, pending confirmation`);
+      return "dryrun";
     }
-
-    this.driftClient.perpMarketLastSlotCache.set(orderParams.marketIndex, confirmation.context.slot);
-    return sig;
   }
 
   private async tryMakeJitAuctionForMarket(market: PerpMarketAccount) {
