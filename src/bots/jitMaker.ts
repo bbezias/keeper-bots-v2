@@ -433,7 +433,20 @@ export class JitMakerBot implements Bot {
     logger.info("Kucoin initiating");
     this.kucoin = new KucoinController();
     await this.kucoin.initialise();
-    await sleep(2000);
+
+    let retries = 0;
+    while (!this.kucoin.api.ws.openingTime) {
+      retries += 1;
+
+      if (retries >= 5) {
+        throw Error("Could not connect to Kucoin websocket");
+      }
+
+      logger.info("Waiting for websocket isConnected signal...");
+
+      await sleep(2000);
+    }
+
     this.kucoin.subscribe(KUCOIN_CONTRACTS.sol).then(() => {
       logger.info(`✅ Websocket SOLUSDTM subscribed with kucoin`);
     });

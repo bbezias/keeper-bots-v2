@@ -55,7 +55,6 @@ export class KucoinController extends EventEmitter {
   }
 
   async initialise(): Promise<void> {
-    await this.api.ws.terminate();
     await this.api.ws.initialise();
     console.log("Websocket opened with kucoin");
   }
