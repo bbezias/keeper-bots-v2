@@ -697,7 +697,7 @@ export class JitMakerBot implements Bot {
         }
 
         if (p.marketIndex === 0 || p.marketIndex === 1 || p.marketIndex === 2 || p.marketIndex === 3 || p.marketIndex === 5) {
-          if (!perpPositions[p.marketIndex] && !p.baseAssetAmount.eq(ZERO)) {
+          if (!perpPositions[p.marketIndex] || !p.baseAssetAmount.eq(ZERO)) {
             perpPositions[p.marketIndex] = p;
           }
         }
