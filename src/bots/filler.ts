@@ -462,7 +462,7 @@ export class FillerBot implements Bot {
 							});
 						}
 					} catch (e) {
-						logger.error("Error increasing fill count counter", e);
+						logger.error(`Error increasing fill count counter ${e}`);
 					}
 				}
 			}
