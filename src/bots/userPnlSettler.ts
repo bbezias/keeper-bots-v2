@@ -139,20 +139,28 @@ export class UserPnlSettlerBot implements Bot {
 			} = {};
 
 			this.perpMarkets.forEach((market) => {
+				const perpMarket = this.driftClient.getPerpMarketAccount(
+					market.marketIndex
+				);
+				if (!perpMarket) {
+					return;
+				}
 				perpMarketAndOracleData[market.marketIndex] = {
-					marketAccount: this.driftClient.getPerpMarketAccount(
-						market.marketIndex
-					),
+					marketAccount: perpMarket,
 					oraclePriceData: this.driftClient.getOracleDataForPerpMarket(
 						market.marketIndex
 					),
 				};
 			});
 			this.spotMarkets.forEach((market) => {
+				const spotMarket = this.driftClient.getSpotMarketAccount(
+					market.marketIndex
+				);
+				if (!spotMarket) {
+					return;
+				}
 				spotMarketAndOracleData[market.marketIndex] = {
-					marketAccount: this.driftClient.getSpotMarketAccount(
-						market.marketIndex
-					),
+					marketAccount: spotMarket,
 					oraclePriceData: this.driftClient.getOracleDataForSpotMarket(
 						market.marketIndex
 					),
@@ -163,6 +171,10 @@ export class UserPnlSettlerBot implements Bot {
 
 			const validOracleMarketMap = new Map<number, boolean>();
 			this.perpMarkets.forEach((market) => {
+				if (!perpMarketAndOracleData[market.marketIndex]) {
+					validOracleMarketMap.set(market.marketIndex, false);
+					return;
+				}
 				const oracleValid = isOracleValid(
 					perpMarketAndOracleData[market.marketIndex].marketAccount.amm,
 					perpMarketAndOracleData[market.marketIndex].oraclePriceData,
@@ -190,18 +202,25 @@ export class UserPnlSettlerBot implements Bot {
 						continue;
 					}
 
-					const marketIndexNum = settleePosition.marketIndex;
+					const perpMarketIdx = settleePosition.marketIndex;
+					const spotMarketIdx = 0;
 
-					const oracleValid = validOracleMarketMap.get(marketIndexNum);
+					const oracleValid = validOracleMarketMap.get(perpMarketIdx);
 					if (!oracleValid) {
+						continue;
+					}
+					if (
+						!perpMarketAndOracleData[perpMarketIdx] ||
+						!spotMarketAndOracleData[spotMarketIdx]
+					) {
 						continue;
 					}
 
 					const unsettledPnl = calculateClaimablePnl(
-						perpMarketAndOracleData[marketIndexNum].marketAccount,
-						spotMarketAndOracleData[0].marketAccount, // always liquidating the USDC spot market
+						perpMarketAndOracleData[perpMarketIdx].marketAccount,
+						spotMarketAndOracleData[spotMarketIdx].marketAccount, // always liquidating the USDC spot market
 						settleePosition,
-						perpMarketAndOracleData[marketIndexNum].oraclePriceData
+						perpMarketAndOracleData[perpMarketIdx].oraclePriceData
 					);
 
 					// only settle for $10 or more negative pnl
@@ -214,16 +233,16 @@ export class UserPnlSettlerBot implements Bot {
 
 					if (unsettledPnl.gt(ZERO)) {
 						const pnlImbalance = calculateNetUserPnlImbalance(
-							perpMarketAndOracleData[marketIndexNum].marketAccount,
-							spotMarketAndOracleData[0].marketAccount,
-							perpMarketAndOracleData[marketIndexNum].oraclePriceData
+							perpMarketAndOracleData[perpMarketIdx].marketAccount,
+							spotMarketAndOracleData[spotMarketIdx].marketAccount,
+							perpMarketAndOracleData[perpMarketIdx].oraclePriceData
 						).mul(new BN(-1));
 
 						if (pnlImbalance.lte(ZERO)) {
 							logger.warn(
 								`Want to settle positive PnL for user ${user
 									.getUserAccountPublicKey()
-									.toBase58()} in market ${marketIndexNum}, but there is a pnl imbalance (${convertToNumber(
+									.toBase58()} in market ${perpMarketIdx}, but there is a pnl imbalance (${convertToNumber(
 									pnlImbalance,
 									QUOTE_PRECISION
 								)})`
@@ -251,10 +270,10 @@ export class UserPnlSettlerBot implements Bot {
 					if (
 						usersToSettle
 							.map((item) => item.marketIndex)
-							.includes(marketIndexNum)
+							.includes(perpMarketIdx)
 					) {
 						usersToSettle
-							.find((item) => item.marketIndex == marketIndexNum)
+							.find((item) => item.marketIndex == perpMarketIdx)
 							.users.push(userData);
 					} else {
 						usersToSettle.push({
@@ -283,7 +302,7 @@ export class UserPnlSettlerBot implements Bot {
 					const usersChunk = params.users.slice(i, i + SETTLE_USER_CHUNKS);
 					try {
 						settlePnlPromises.push(
-							this.driftClient.settlePNLs(usersChunk, params.marketIndex)
+							this.driftClient.settlePNLs(usersChunk, [params.marketIndex])
 						);
 					} catch (err) {
 						const errorCode = getErrorCode(err);

@@ -3,6 +3,10 @@ import { program, Option } from 'commander';
 import * as http from 'http';
 
 import { Connection, Commitment, Keypair, PublicKey } from '@solana/web3.js';
+import {
+	SearcherClient,
+	searcherClient,
+} from 'jito-ts/dist/sdk/block-engine/searcher';
 
 import {
 	Token,
@@ -10,28 +14,22 @@ import {
 	ASSOCIATED_TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
 import {
-	getVariant,
 	BulkAccountLoader,
 	DriftClient,
 	User,
 	initialize,
 	Wallet,
-	DriftEnv,
 	EventSubscriber,
 	SlotSubscriber,
 	convertToNumber,
 	QUOTE_PRECISION,
-	SPOT_MARKET_BALANCE_PRECISION,
 	SpotMarkets,
 	PerpMarkets,
 	BN,
-	BASE_PRECISION,
-	getSignedTokenAmount,
 	TokenFaucet,
 	DriftClientSubscriptionConfig,
 	LogProviderConfig,
 } from '@drift-labs/sdk';
-import { assert } from '@drift-labs/sdk/lib/assert/assert';
 import { promiseTimeout } from '@drift-labs/sdk/lib/util/promiseTimeout';
 import { Mutex } from 'async-mutex';
 
@@ -59,10 +57,7 @@ import {
 } from './config';
 
 require('dotenv').config();
-const driftEnv = (process.env.ENV || 'devnet') as DriftEnv;
 const commitHash = process.env.COMMIT;
-//@ts-ignore
-const sdkConfig = initialize({ env: process.env.ENV });
 
 const stateCommitment: Commitment = 'confirmed';
 const healthCheckPort = process.env.HEALTH_CHECK_PORT || 8888;
@@ -133,6 +128,10 @@ program
 		'Config file to load (yaml format), will override any other config options',
 		''
 	)
+	.option(
+		'--use-jito',
+		'Submit transactions to a Jito relayer if the bot supports it'
+	)
 	.parse();
 
 const opts = program.opts();
@@ -157,15 +156,12 @@ logger.info(
 	)}`
 );
 
+// @ts-ignore
+const sdkConfig = initialize({ env: config.global.driftEnv });
+
 setLogLevel(config.global.debug ? 'debug' : 'info');
 
-export function getWallet(): Wallet {
-	const privateKey = config.global.keeperPrivateKey;
-	if (!privateKey) {
-		throw new Error(
-			'Must set environment variable KEEPER_PRIVATE_KEY with the path to a id.json or a list of commma separated numbers'
-		);
-	}
+function loadKeypair(privateKey: string): Keypair {
 	// try to load privateKey as a filepath
 	let loadedKey: Uint8Array;
 	if (fs.existsSync(privateKey)) {
@@ -185,15 +181,25 @@ export function getWallet(): Wallet {
 		}
 	}
 
-	const keypair = Keypair.fromSecretKey(Uint8Array.from(loadedKey));
-	return new Wallet(keypair);
+	return Keypair.fromSecretKey(Uint8Array.from(loadedKey));
+}
+
+export function getWallet(): [Keypair, Wallet] {
+	const privateKey = config.global.keeperPrivateKey;
+	if (!privateKey) {
+		throw new Error(
+			'Must set environment variable KEEPER_PRIVATE_KEY with the path to a id.json or a list of commma separated numbers'
+		);
+	}
+	const keypair = loadKeypair(privateKey);
+	return [keypair, new Wallet(keypair)];
 }
 
 const endpoint = config.global.endpoint;
 const wsEndpoint = config.global.wsEndpoint;
 logger.info(`RPC endpoint: ${endpoint}`);
 logger.info(`WS endpoint:  ${wsEndpoint}`);
-logger.info(`DriftEnv:     ${driftEnv}`);
+logger.info(`DriftEnv:     ${config.global.driftEnv}`);
 logger.info(`Commit:       ${commitHash}`);
 
 function sleep(ms) {
@@ -223,76 +229,9 @@ function printUserAccountStats(clearingHouseUser: User) {
 	);
 }
 
-function printOpenPositions(clearingHouseUser: User) {
-	logger.info('Open Perp Positions:');
-	for (const p of clearingHouseUser.getUserAccount().perpPositions) {
-		if (p.baseAssetAmount.isZero()) {
-			continue;
-		}
-		const market = PerpMarkets[driftEnv][p.marketIndex];
-		console.log(`[${market.symbol}]`);
-		console.log(
-			` . baseAssetAmount:  ${convertToNumber(
-				p.baseAssetAmount,
-				BASE_PRECISION
-			).toString()}`
-		);
-		console.log(
-			` . quoteAssetAmount: ${convertToNumber(
-				p.quoteAssetAmount,
-				QUOTE_PRECISION
-			).toString()}`
-		);
-		console.log(
-			` . quoteEntryAmount: ${convertToNumber(
-				p.quoteEntryAmount,
-				QUOTE_PRECISION
-			).toString()}`
-		);
-
-		console.log(
-			` . lastCumulativeFundingRate: ${convertToNumber(
-				p.lastCumulativeFundingRate,
-				new BN(10).pow(new BN(14))
-			)}`
-		);
-		console.log(
-			` . openOrders: ${p.openOrders.toString()}, openBids: ${convertToNumber(
-				p.openBids,
-				BASE_PRECISION
-			)}, openAsks: ${convertToNumber(p.openAsks, BASE_PRECISION)}`
-		);
-	}
-
-	logger.info('Open Spot Positions:');
-	for (const p of clearingHouseUser.getUserAccount().spotPositions) {
-		if (p.scaledBalance.isZero()) {
-			continue;
-		}
-		const market = SpotMarkets[driftEnv][p.marketIndex];
-		console.log(`[${market.symbol}]`);
-		console.log(
-			` . baseAssetAmount:  ${convertToNumber(
-				getSignedTokenAmount(p.scaledBalance, p.balanceType),
-				SPOT_MARKET_BALANCE_PRECISION
-			).toString()}`
-		);
-		console.log(` . balanceType: ${getVariant(p.balanceType)}`);
-		console.log(
-			` . openOrders: ${p.openOrders.toString()}, openBids: ${convertToNumber(
-				p.openBids,
-				SPOT_MARKET_BALANCE_PRECISION
-			)}, openAsks: ${convertToNumber(
-				p.openAsks,
-				SPOT_MARKET_BALANCE_PRECISION
-			)}`
-		);
-	}
-}
-
 const bots: Bot[] = [];
 const runBot = async () => {
-	const wallet = getWallet();
+	const [keypair, wallet] = getWallet();
 	const driftPublicKey = new PublicKey(sdkConfig.DRIFT_PROGRAM_ID);
 
 	const connection = new Connection(endpoint, {
@@ -331,9 +270,13 @@ const runBot = async () => {
 		connection,
 		wallet,
 		programID: driftPublicKey,
-		perpMarketIndexes: PerpMarkets[driftEnv].map((mkt) => mkt.marketIndex),
-		spotMarketIndexes: SpotMarkets[driftEnv].map((mkt) => mkt.marketIndex),
-		oracleInfos: PerpMarkets[driftEnv].map((mkt) => {
+		perpMarketIndexes: PerpMarkets[config.global.driftEnv].map(
+			(mkt) => mkt.marketIndex
+		),
+		spotMarketIndexes: SpotMarkets[config.global.driftEnv].map(
+			(mkt) => mkt.marketIndex
+		),
+		oracleInfos: PerpMarkets[config.global.driftEnv].map((mkt) => {
 			return { publicKey: mkt.oracle, source: mkt.oracleSource };
 		}),
 		opts: {
@@ -342,7 +285,7 @@ const runBot = async () => {
 			preflightCommitment: stateCommitment,
 		},
 		accountSubscription,
-		env: driftEnv,
+		env: config.global.driftEnv,
 		userStats: true,
 		txSenderConfig: {
 			type: 'retry',
@@ -377,7 +320,7 @@ const runBot = async () => {
 	try {
 		const tokenAccount = await getOrCreateAssociatedTokenAccount(
 			connection,
-			new PublicKey(constants[driftEnv].USDCMint),
+			new PublicKey(constants[config.global.driftEnv].USDCMint),
 			wallet
 		);
 		const usdcBalance = await connection.getTokenAccountBalance(tokenAccount);
@@ -480,7 +423,7 @@ const runBot = async () => {
 			throw new Error('Deposit amount must be greater than 0');
 		}
 
-		const mint = SpotMarkets[driftEnv][0].mint; // TODO: are index 0 always USDC???, support other collaterals
+		const mint = SpotMarkets[config.global.driftEnv][0].mint; // TODO: are index 0 always USDC???, support other collaterals
 
 		const ata = await Token.getAssociatedTokenAddress(
 			ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -491,7 +434,7 @@ const runBot = async () => {
 
 		const amount = new BN(config.global.forceDeposit).mul(QUOTE_PRECISION);
 
-		if (driftEnv == 'devnet') {
+		if (config.global.driftEnv === 'devnet') {
 			const tokenFaucet = new TokenFaucet(
 				connection,
 				wallet,
@@ -512,23 +455,32 @@ const runBot = async () => {
 		return;
 	}
 
-	// print user orders
-	logger.info('');
-	const ordersToCancel: Array<number> = [];
-	for (const order of driftUser.getUserAccount().orders) {
-		if (order.baseAssetAmount.isZero()) {
-			continue;
+	let jitoSearcherClient: SearcherClient | undefined;
+	let jitoAuthKeypair: Keypair | undefined;
+	if (config.global.useJito) {
+		const jitoBlockEngineUrl = config.global.jitoBlockEngineUrl;
+		const privateKey = config.global.jitoAuthPrivateKey;
+		if (!jitoBlockEngineUrl) {
+			throw new Error(
+				'Must configure or set JITO_BLOCK_ENGINE_URL environment variable '
+			);
 		}
-		ordersToCancel.push(order.orderId);
-	}
-	if (config.global.cancelOpenOrders) {
-		for (const order of ordersToCancel) {
-			logger.info(`Cancelling open order ${order.toString()}`);
-			await driftClient.cancelOrder(order);
+		if (!privateKey) {
+			throw new Error(
+				'Must configure or set JITO_AUTH_PRIVATE_KEY environment variable'
+			);
 		}
+		jitoAuthKeypair = loadKeypair(privateKey);
+		jitoSearcherClient = searcherClient(jitoBlockEngineUrl, jitoAuthKeypair);
+		jitoSearcherClient.onBundleResult(
+			(bundle) => {
+				logger.info(`JITO bundle result: ${JSON.stringify(bundle)}`);
+			},
+			(error) => {
+				logger.error(`JITO bundle error: ${error}`);
+			}
+		);
 	}
-
-	printOpenPositions(driftUser);
 
 	/*
 	 * Start bots depending on flags enabled
@@ -543,11 +495,14 @@ const runBot = async () => {
 				{
 					rpcEndpoint: endpoint,
 					commit: commitHash,
-					driftEnv: driftEnv,
+					driftEnv: config.global.driftEnv,
 					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
-				config.botConfigs.filler
+				config.botConfigs.filler,
+				jitoSearcherClient,
+				jitoAuthKeypair,
+				keypair
 			)
 		);
 	}
@@ -559,7 +514,7 @@ const runBot = async () => {
 				{
 					rpcEndpoint: endpoint,
 					commit: commitHash,
-					driftEnv: driftEnv,
+					driftEnv: config.global.driftEnv,
 					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
@@ -576,7 +531,7 @@ const runBot = async () => {
 				{
 					rpcEndpoint: endpoint,
 					commit: commitHash,
-					driftEnv: driftEnv,
+					driftEnv: config.global.driftEnv,
 					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
@@ -592,7 +547,7 @@ const runBot = async () => {
 				{
 					rpcEndpoint: endpoint,
 					commit: commitHash,
-					driftEnv: driftEnv,
+					driftEnv: config.global.driftEnv,
 					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
@@ -602,11 +557,6 @@ const runBot = async () => {
 	}
 
 	if (configHasBot(config, 'liquidator')) {
-		assert(
-			config.global.subaccounts.length === 1,
-			'Liquidator bot only works with one subaccount specified'
-		);
-
 		bots.push(
 			new LiquidatorBot(
 				bulkAccountLoader,
@@ -614,11 +564,12 @@ const runBot = async () => {
 				{
 					rpcEndpoint: endpoint,
 					commit: commitHash,
-					driftEnv: driftEnv,
+					driftEnv: config.global.driftEnv,
 					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
-				config.botConfigs.liquidator
+				config.botConfigs.liquidator,
+				config.global.subaccounts[0]
 			)
 		);
 	}
@@ -630,7 +581,7 @@ const runBot = async () => {
 				{
 					rpcEndpoint: endpoint,
 					commit: commitHash,
-					driftEnv: driftEnv,
+					driftEnv: config.global.driftEnv,
 					driftPid: driftPublicKey.toBase58(),
 					walletAuthority: wallet.publicKey.toBase58(),
 				},
@@ -643,8 +594,8 @@ const runBot = async () => {
 		bots.push(
 			new UserPnlSettlerBot(
 				driftClient,
-				PerpMarkets[driftEnv],
-				SpotMarkets[driftEnv],
+				PerpMarkets[config.global.driftEnv],
+				SpotMarkets[config.global.driftEnv],
 				config.botConfigs.userPnlSettler
 			)
 		);
@@ -654,7 +605,7 @@ const runBot = async () => {
 		bots.push(
 			new IFRevenueSettlerBot(
 				driftClient,
-				SpotMarkets[driftEnv],
+				SpotMarkets[config.global.driftEnv],
 				config.botConfigs.ifRevenueSettler
 			)
 		);

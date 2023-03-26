@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import YAML from 'yaml';
 import { loadCommaDelimitToArray } from './utils';
+import { DriftEnv } from '@drift-labs/sdk';
 
 export type BaseBotConfig = {
 	botId: string;
@@ -15,10 +16,16 @@ export type FillerConfig = BaseBotConfig & {
 	revertOnFailure?: boolean;
 };
 
+export type SubaccountConfig = {
+	[key: number]: Array<number>;
+};
+
 export type LiquidatorConfig = BaseBotConfig & {
-	perpMarketIndicies: Array<number>;
-	spotMarketIndicies: Array<number>;
 	disableAutoDerisking: boolean;
+	perpMarketIndicies?: Array<number>;
+	spotMarketIndicies?: Array<number>;
+	perpSubAccountConfig?: SubaccountConfig;
+	spotSubAccountConfig?: SubaccountConfig;
 };
 
 export type BotConfigMap = {
@@ -33,6 +40,7 @@ export type BotConfigMap = {
 };
 
 export interface GlobalConfig {
+	driftEnv?: DriftEnv;
 	endpoint?: string;
 	wsEndpoint?: string;
 	keeperPrivateKey?: string;
@@ -48,6 +56,10 @@ export interface GlobalConfig {
 
 	eventSubscriberPollingInterval: number;
 	bulkAccountLoaderPollingInterval: number;
+
+	useJito?: boolean;
+	jitoBlockEngineUrl?: string;
+	jitoAuthPrivateKey?: string;
 }
 
 export interface Config {
@@ -58,6 +70,7 @@ export interface Config {
 
 const defaultConfig: Partial<Config> = {
 	global: {
+		driftEnv: (process.env.ENV ?? 'devnet') as DriftEnv,
 		initUser: false,
 		testLiveness: false,
 		cancelOpenOrders: false,
@@ -74,6 +87,10 @@ const defaultConfig: Partial<Config> = {
 		endpoint: process.env.ENDPOINT,
 		wsEndpoint: process.env.WS_ENDPOINT,
 		keeperPrivateKey: process.env.KEEPER_PRIVATE_KEY,
+
+		useJito: false,
+		jitoBlockEngineUrl: process.env.JITO_BLOCK_ENGINE_URL,
+		jitoAuthPrivateKey: process.env.JITO_AUTH_PRIVATE_KEY,
 	},
 	enabledBots: [],
 	botConfigs: {},
@@ -129,6 +146,7 @@ export function loadConfigFromFile(path: string): Config {
 export function loadConfigFromOpts(opts: any): Config {
 	const config: Config = {
 		global: {
+			driftEnv: (process.env.ENV ?? 'devnet') as DriftEnv,
 			endpoint: opts.endpoint ?? process.env.ENDPOINT,
 			wsEndpoint: opts.wsEndpoint ?? process.env.WS_ENDPOINT,
 			keeperPrivateKey: opts.privateKey ?? process.env.KEEPER_PRIVATE_KEY,
@@ -145,6 +163,7 @@ export function loadConfigFromOpts(opts: any): Config {
 			runOnce: opts.runOnce ?? false,
 			debug: opts.debug ?? false,
 			subaccounts: loadCommaDelimitToArray(opts.subaccount),
+			useJito: opts.useJito ?? false,
 		},
 		enabledBots: [],
 		botConfigs: {},
