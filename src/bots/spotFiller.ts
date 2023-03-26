@@ -52,7 +52,7 @@ import {
 	InstrumentType,
 	MeterProvider,
 	View,
-} from '@opentelemetry/sdk-metrics-base';
+} from '@opentelemetry/sdk-metrics';
 import {
 	Meter,
 	ObservableGauge,

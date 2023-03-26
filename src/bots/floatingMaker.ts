@@ -27,7 +27,7 @@ import {
 	InstrumentType,
 	MeterProvider,
 	View,
-} from '@opentelemetry/sdk-metrics-base';
+} from '@opentelemetry/sdk-metrics';
 import { BaseBotConfig } from '../config';
 
 type State = {
@@ -240,7 +240,7 @@ export class FloatingPerpMakerBot implements Bot {
 			this.agentState.marketPosition.set(p.marketIndex, p);
 		});
 
-		// zeor out the open orders
+		// zero out the open orders
 		for (const market of PerpMarkets[driftEnv]) {
 			this.agentState.openOrders.set(market.marketIndex, []);
 		}

@@ -25,7 +25,7 @@ import {
 	InstrumentType,
 	MeterProvider,
 	View,
-} from '@opentelemetry/sdk-metrics-base';
+} from '@opentelemetry/sdk-metrics';
 import { RuntimeSpec, metricAttrFromUserAccount } from '../metrics';
 
 const dlobMutexError = new Error('dlobMutex timeout');

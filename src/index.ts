@@ -366,7 +366,7 @@ const runBot = async () => {
 	const slotSubscriber = new SlotSubscriber(connection, {});
 	const lastSlotReceivedMutex = new Mutex();
 	let lastSlotReceived: number;
-	let lastHealthCheckSlot = -1;
+	const lastHealthCheckSlot = -1;
 	const startupTime = Date.now();
 
 	const lamportsBalance = await connection.getBalance(wallet.publicKey);

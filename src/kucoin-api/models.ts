@@ -22,6 +22,29 @@ export interface Order {
   matchLotSize: string;
   matchSize: string;
   timestamp: number;
+  type?: 'open' | 'match' | 'filled' | 'canceled' | 'update';
+}
+
+export interface OrderUpdate {
+  orderId: string;
+  symbol: string;
+  type: 'match' | 'open' | 'filled' | 'canceled' | 'update';
+  status: 'open' | 'match' | 'done';
+  matchSize?: string;
+  matchPrize?: string;
+  orderType: 'limit' | 'market';
+  side: "buy" | "sell";
+  price: string;
+  size: string;
+  remainSize: string;
+  filledSize: string;
+  canceledSize: string;
+  tradeId?: string;
+  clientOid: string;
+  orderTime: number;
+  oldSize?: string;
+  liquidity: string;
+  ts: number;
 }
 
 export interface Fill {
@@ -62,6 +85,8 @@ export interface PositionPriceChange {
   realisedPnl?: number;
 }
 
+export type OrderSide = "bids" | "asks";
+
 export class OrderBook {
   _asks: [number, number][]; // [price, volume]
   _bids: [number, number][]; // [price, volume]
@@ -91,6 +116,26 @@ export class OrderBook {
       totalSize += x[1];
       if (totalSize >= min) return x[0];
     }
+  }
+
+  vwap(side: OrderSide, depth: number) {
+    // Check if the depth is valid
+    if (depth < 1) {
+      throw new Error("Depth must be greater than 0.");
+    }
+
+    // Get the desired side (bids or asks) and limit the number of levels based on depth
+    const orders: [number, number][] = side === 'asks' ? this._asks.slice(0, depth) : this._bids;
+
+    // Calculate the VWAP
+    const totalVolume: number = orders.reduce((sum, order) => sum + order[1], 0);
+    const weightedSum: number = orders.reduce((sum, order) => sum + (order[0] * order[1]), 0);
+
+    if (totalVolume === 0) {
+      throw new Error("Total volume is 0. Cannot calculate VWAP.");
+    }
+
+    return weightedSum / totalVolume;
   }
 
   updateData(asks: [number, number][] | undefined = undefined, bids: [number, number][] | undefined = undefined) {

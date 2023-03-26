@@ -25,7 +25,7 @@ export interface PlaceMarketOrderParams {
   clientOid: string;
   side: 'buy' | 'sell';
   symbol: string;
-  type?: 'market';
+  type?: 'market' | 'limit';
   leverage: number;
   remark?: string;
   stop?: 'down' | 'up';
@@ -34,8 +34,9 @@ export interface PlaceMarketOrderParams {
   reduceOnly?: boolean;
   closeOrder?: boolean;
   forceHold?: boolean;
-
+  postOnly?: boolean;
   size: number;
+  price?: string;
 }
 
 export interface PlaceOrderResponse {

@@ -21,6 +21,7 @@ import {
   PlaceOrderResponse, PositionListResponse, PositionParams, PositionResponse, RecentDoneOrdersResponse, RecentFillsResponse,
   SingleOrderParams, SingleOrderResponse, StopOrderListParams, StopOrderListResponse
 } from './trade';
+import { logger } from '../logger';
 
 export interface KucoinFutureApiArgs {
   environment: string;
@@ -72,6 +73,7 @@ export class KucoinFutureApi {
   async kline(params: KlineParams): Promise<KlineResponse> {
     const endpoint = '/api/v1/kline/query';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url);
     return result.data;
   }
@@ -79,6 +81,7 @@ export class KucoinFutureApi {
   async contractList(): Promise<ContractListResponse> {
     const endpoint = '/api/v1/contracts/active';
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url);
     return result.data;
   }
@@ -86,6 +89,7 @@ export class KucoinFutureApi {
   async contract(params: ContractParams): Promise<ContractResponse> {
     const endpoint = '/api/v1/contracts';
     const url = this.baseUrl + endpoint + '/' + params.symbol;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url);
     return result.data;
   }
@@ -93,6 +97,7 @@ export class KucoinFutureApi {
   async time(): Promise<TimeResponse> {
     const endpoint = '/api/v1/timestamp';
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url);
     return result.data;
   }
@@ -100,6 +105,7 @@ export class KucoinFutureApi {
   async status(): Promise<StatusResponse> {
     const endpoint = '/api/v1/status';
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url);
     return result.data;
   }
@@ -107,6 +113,7 @@ export class KucoinFutureApi {
   async historicalData(params: HistoricalDataParams): Promise<HistoricalDataResponse> {
     const endpoint = '/api/v1/trade/history';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url);
     return result.data;
   }
@@ -114,6 +121,7 @@ export class KucoinFutureApi {
   async ticker(params: TickerParams): Promise<TickerResponse> {
     const endpoint = '/api/v1/ticker';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url);
     return result.data;
   }
@@ -135,6 +143,7 @@ export class KucoinFutureApi {
   async accountOverview(params: AccountOverviewParams): Promise<AccountOverviewResponse> {
     const endpoint = '/api/v1/account-overview';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', params));
     return result.data;
   }
@@ -142,6 +151,7 @@ export class KucoinFutureApi {
   async transactionHistory(params: TransactionHistoryParams): Promise<TransactionHistoryResponse> {
     const endpoint = '/api/v1/transaction-history';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', params));
     return result.data;
   }
@@ -150,6 +160,7 @@ export class KucoinFutureApi {
     const endpoint = '/api/v1/orders';
     params.type = 'limit';
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.post(url, params, this.sign(endpoint, 'POST', params));
     return result.data;
   }
@@ -158,6 +169,7 @@ export class KucoinFutureApi {
     const endpoint = '/api/v1/orders';
     params.type = 'market';
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.post(url, params, this.sign(endpoint, 'POST', params));
     return result.data;
   }
@@ -165,6 +177,7 @@ export class KucoinFutureApi {
   async cancelOrder(params: CancelOrderParams): Promise<CancelOrderResponse> {
     const endpoint = '/api/v1/orders' + '/' + params.orderId;
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.delete(url, this.sign(endpoint, 'DELETE', {}));
     return result.data;
   }
@@ -172,6 +185,7 @@ export class KucoinFutureApi {
   async cancelAllOrder(params: CancelAllOrdersParams): Promise<CancelAllOrdersResponse> {
     const endpoint = '/api/v1/orders';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.delete(url, this.sign(endpoint, 'DELETE', params));
     return result.data;
   }
@@ -180,6 +194,7 @@ export class KucoinFutureApi {
   async orderList(params: OrderListParams): Promise<OrderListResponse> {
     const endpoint = '/api/v1/orders';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', params));
     return result.data;
   }
@@ -187,6 +202,7 @@ export class KucoinFutureApi {
   async stopOrderList(params: StopOrderListParams): Promise<StopOrderListResponse> {
     const endpoint = '/api/v1/stopOrders';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', params));
     return result.data;
   }
@@ -194,6 +210,7 @@ export class KucoinFutureApi {
   async recentDoneOrders(): Promise<RecentDoneOrdersResponse> {
     const endpoint = '/api/v1/recentDoneOrders';
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', {}));
     return result.data;
   }
@@ -201,6 +218,7 @@ export class KucoinFutureApi {
   async singleOrder(params: SingleOrderParams): Promise<SingleOrderResponse> {
     const endpoint = '/api/v1/orders';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', params));
     return result.data;
   }
@@ -208,6 +226,7 @@ export class KucoinFutureApi {
   async fills(params: FillsParams): Promise<FillsResponse> {
     const endpoint = '/api/v1/fills';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', params));
     return result.data;
   }
@@ -215,6 +234,7 @@ export class KucoinFutureApi {
   async recentFills(): Promise<RecentFillsResponse> {
     const endpoint = '/api/v1/recentFills';
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', {}));
     return result.data;
   }
@@ -222,6 +242,7 @@ export class KucoinFutureApi {
   async openOrderStatistics(params: OpenOrderStatisticsParams): Promise<OpenOrderStatisticsResponse> {
     const endpoint = '/api/v1/openOrderStatistics';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', params));
     return result.data;
   }
@@ -229,6 +250,7 @@ export class KucoinFutureApi {
   async position(params: PositionParams): Promise<PositionResponse> {
     const endpoint = '/api/v1/position';
     const url = this.baseUrl + endpoint + formatQuery(params);
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', params));
     return result.data;
   }
@@ -236,6 +258,7 @@ export class KucoinFutureApi {
   async positionList(): Promise<PositionListResponse> {
     const endpoint = '/api/v1/positions';
     const url = this.baseUrl + endpoint;
+    logger.debug(`kucoin query ${url}`);
     const result = await axios.get(url, this.sign(endpoint, 'GET', {}));
     return result.data;
   }

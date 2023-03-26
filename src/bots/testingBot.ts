@@ -16,7 +16,7 @@ import { logger } from '../logger';
 import { Bot } from '../types';
 
 import { RuntimeSpec } from '../metrics';
-import { JitMakerConfig, TestingBotConfig } from '../config';
+import { TestingBotConfig } from '../config';
 
 // State enum
 enum StateType {

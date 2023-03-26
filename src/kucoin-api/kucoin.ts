@@ -59,7 +59,7 @@ export class KucoinController extends EventEmitter {
     console.log("Websocket opened with kucoin");
   }
 
-  async subscribe(symbol: string): Promise<void> {
+  async subscribe(symbol: string, subscribeBook = true, subscribeOrders = true, subscribePosition = true, subscribeExecution = true): Promise<void> {
 
     if (!(symbol in this.handlers)) {
       this.handlers[symbol] = { lastRcv: 0, ready: false };
@@ -69,90 +69,99 @@ export class KucoinController extends EventEmitter {
       throw new Error("First you need to open the socket");
     }
 
-    setTimeout(() => {
-      this.api.ws.level2Depth50(symbol, (msg) => {
-        const od = new OrderBook('kucoin', symbol, msg.asks, msg.bids);
-        const handler = this.handlers[symbol];
-        handler.lastRcv = (new Date()).getTime();
-        handler.ready = true;
-        handler.book = od;
-        this.emit('book', { source: 'kucoin', data: od });
-      }).catch(e => {
-        console.log(chalk.red('error kucoin', e));
-      });
-    }, 1000);
+    if (subscribeBook) {
+      setTimeout(() => {
+        this.api.ws.level2Depth50(symbol, (msg) => {
+          const od = new OrderBook('kucoin', symbol, msg.asks, msg.bids);
+          const handler = this.handlers[symbol];
+          handler.lastRcv = (new Date()).getTime();
+          handler.ready = true;
+          handler.book = od;
+          this.emit('book', { source: 'kucoin', data: od });
+        }).catch(e => {
+          console.log(chalk.red('error kucoin', e));
+        });
+      }, 1000);
+    }
 
-    setTimeout(() => {
-      this.api.ws.ordersMarket(symbol, (msg) => {
-        // Convert size in lot to size of notional
-        const size = +msg.size;
-        const matchSize = +msg.filledSize;
+    if (subscribeOrders) {
+      setTimeout(() => {
+        this.api.ws.ordersMarket(symbol, (msg) => {
+          // Convert size in lot to size of notional
+          const size = +msg.size;
+          const matchSize = +msg.filledSize;
 
-        if (!msg.price) return;
+          if (!msg.price) return;
 
-        const o: Order = {
-          orderId: msg.orderId,
-          exchange: 'kucoin',
-          price: msg.price,
-          side: msg.side,
-          orderType: 'unknown',
-          symbol: msg.symbol,
-          timestamp: msg.ts / 1000000,
-          status: msg.status,
-          size: size.toPrecision(3),
-          lotSize: msg.size,
-          matchSize: matchSize.toPrecision(3),
-          matchLotSize: msg.matchSize ? msg.matchSize : '0'
-        };
-        this.emit('order', o);
-      });
-    }, 1400);
-
-    setTimeout(() => {
-      this.api.ws.position(symbol, (msg) => {
-        if ((msg as PositionChangeOperationResponse).changeReason !== 'markPriceChange') {
-          const x = msg as PositionChangeOperationResponse;
-          const size = x.currentQty;
-          const p: Position = {
-            currentQty: size,
-            symbol: x.symbol,
-            realisedPnl: x.realisedPnl,
-            unrealisedPnl: x.unrealisedPnl,
-            markPrice: x.markPrice,
-            avgEntryPrice: x.avgEntryPrice,
-            markValue: x.markValue,
+          const o: Order = {
+            orderId: msg.orderId,
             exchange: 'kucoin',
-            unrealisedPnlPcnt: x.unrealisedPnlPcnt,
-            unrealisedCost: x.unrealisedCost,
-            realisedCost: x.realisedCost
+            price: msg.price,
+            side: msg.side,
+            orderType: 'unknown',
+            symbol: msg.symbol,
+            timestamp: msg.ts / 1000000,
+            status: msg.status,
+            size: size.toPrecision(3),
+            lotSize: msg.size,
+            matchSize: matchSize.toPrecision(3),
+            matchLotSize: msg.matchSize ? msg.matchSize : '0',
+            type: msg.type
           };
-          this.emit('positionOperationChange', p);
-        } else {
-          const x = msg as PositionChangePriceResponse;
-          const p: PositionPriceChange = {
-            markPrice: x.markPrice,
-            exchange: 'kucoin',
-            markValue: x.markValue,
-            symbol: x.symbol,
-            unrealisedPnl: x.unrealisedPnl,
-            unrealisedPnlPcnt: x.unrealisedPnlPcnt
+          this.emit('order', o);
+        });
+      }, 1400);
+    }
+
+    if (subscribePosition) {
+      setTimeout(() => {
+        this.api.ws.position(symbol, (msg) => {
+          if ((msg as PositionChangeOperationResponse).changeReason !== 'markPriceChange') {
+            const x = msg as PositionChangeOperationResponse;
+            const size = x.currentQty;
+            const p: Position = {
+              currentQty: size,
+              symbol: x.symbol,
+              realisedPnl: x.realisedPnl,
+              unrealisedPnl: x.unrealisedPnl,
+              markPrice: x.markPrice,
+              avgEntryPrice: x.avgEntryPrice,
+              markValue: x.markValue,
+              exchange: 'kucoin',
+              unrealisedPnlPcnt: x.unrealisedPnlPcnt,
+              unrealisedCost: x.unrealisedCost,
+              realisedCost: x.realisedCost
+            };
+            this.emit('positionOperationChange', p);
+          } else {
+            const x = msg as PositionChangePriceResponse;
+            const p: PositionPriceChange = {
+              markPrice: x.markPrice,
+              exchange: 'kucoin',
+              markValue: x.markValue,
+              symbol: x.symbol,
+              unrealisedPnl: x.unrealisedPnl,
+              unrealisedPnlPcnt: x.unrealisedPnlPcnt
+            };
+            this.emit('positionPriceChange', p);
+          }
+
+        });
+      }, 1800);
+    }
+
+    if (subscribeExecution) {
+      setTimeout(() => {
+        this.api.ws.execution(symbol, (msg) => {
+          const trades: Trades = {
+            trades: [msg], symbol: symbol, source: 'kucoin', datetime: new Date()
           };
-          this.emit('positionPriceChange', p);
-        }
+          this.emit('trades', { source: 'kucoin', data: trades });
+        });
+      }, 1200);
 
-      });
-    }, 1800);
-
-    setTimeout(() => {
-      this.api.ws.execution(symbol, (msg) => {
-        const trades: Trades = {
-          trades: [msg], symbol: symbol, source: 'kucoin', datetime: new Date()
-        };
-        this.emit('trades', { source: 'kucoin', data: trades });
-      });
-    }, 1200);
-
-    this.websocketHasBeenOpen = true;
+      this.websocketHasBeenOpen = true;
+    }
   }
 
   exit(): void {

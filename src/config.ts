@@ -21,9 +21,14 @@ export type LiquidatorConfig = BaseBotConfig & {
 };
 
 export type JitMakerConfig = BaseBotConfig & {
-	profitThreshold: number;
-	profitThresholdIfReduce: number;
-	kucoinTakerFee: number;
+	profitThreshold: {
+		sol: number,
+		btc: number
+		eth: number,
+		apt: number,
+		matic: number
+	};
+	kucoinMakerFee: number;
 	maxPositionExposure: number;
 	maxTradeSize: {
 		sol: number,
@@ -31,7 +36,38 @@ export type JitMakerConfig = BaseBotConfig & {
 		eth: number,
 		apt: number,
 		matic: number
+	},
+	priceDistanceBeforeUpdateLimit: {
+		sol: number,
+		btc: number
+		eth: number,
+		apt: number,
+		matic: number
+	},
+	marketEnabled: {
+		sol: boolean,
+		btc: boolean
+		eth: boolean,
+		apt: boolean,
+		matic: boolean
 	}
+};
+
+export type GPTBotConfig = BaseBotConfig & {
+	k1: number,
+	k2: number,
+	k3: number,
+	k4: number,
+	k5: number,
+	k6: number
+	marketEnabled: {
+		sol: boolean,
+		btc: boolean
+		eth: boolean,
+		apt: boolean,
+		matic: boolean
+	},
+	maxPositionExposure: number
 };
 
 export type TestingBotConfig = BaseBotConfig & {
@@ -45,6 +81,7 @@ export type BotConfigMap = {
 	liquidator?: LiquidatorConfig;
 	floatingMaker?: BaseBotConfig;
 	jitMaker?: JitMakerConfig;
+	gptBot?: GPTBotConfig;
 	testingBot?: TestingBotConfig;
 	ifRevenueSettler?: BaseBotConfig;
 	userPnlSettler?: BaseBotConfig;
@@ -217,11 +254,28 @@ export function loadConfigFromOpts(opts: any): Config {
 			dryRun: opts.dryRun ?? false,
 			botId: process.env.BOT_ID ?? 'jitMaker',
 			metricsPort: 9468,
-			kucoinTakerFee: opts.kucoinTakerFee ?? 0.0006,
+			kucoinMakerFee: opts.kucoinMakerFee ?? 0.0002,
 			maxTradeSize: opts.maxTradeSize ?? {sol: 0.1, btc: 0.001, eth: 0.01, apt: 0.1, matic: 10},
+			priceDistanceBeforeUpdateLimit: opts.priceDistanceBeforeUpdateLimit ?? {sol: 0.08, btc: 8, eth: 0.3, apt: 0.2, matic: 0.08},
+			marketEnabled: opts.marketEnabled ?? {sol: true, btc: true, eth: true, apt: true, matic: true},
 			maxPositionExposure: opts.maxPositionExposure ?? 0.1,
-			profitThreshold: opts.profitThreshold ?? 0.0025,
-			profitThresholdIfReduce: opts.profitThresholdIfReduce ?? 0.0005
+			profitThreshold: opts.profitThreshold ?? {sol: 0.001, btc: 0.001, eth: 0.001, apt: 0.003, matic: 0.001},
+		};
+	}
+	if (opts.gptBot) {
+		config.enabledBots.push('gptBot');
+		config.botConfigs.gptBot = {
+			dryRun: opts.dryRun ?? false,
+			botId: process.env.BOT_ID ?? 'gptBot',
+			metricsPort: 9469,
+			k1: opts.k1 ?? 1,
+			k2: opts.k2 ?? 1,
+			k3: opts.k3 ?? 1,
+			k4: opts.k4 ?? 1,
+			k5: opts.k5 ?? 1,
+			k6: opts.k6 ?? 1,
+			maxPositionExposure: 10,
+			marketEnabled: opts.marketEnabled ?? {sol: true, btc: true, eth: true, apt: true, matic: true},
 		};
 	}
 	if (opts.testingBot) {

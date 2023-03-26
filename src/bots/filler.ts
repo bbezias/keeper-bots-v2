@@ -47,11 +47,8 @@ import {
 
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import {
-	ExplicitBucketHistogramAggregation,
-	InstrumentType,
 	MeterProvider,
-	View,
-} from '@opentelemetry/sdk-metrics-base';
+} from '@opentelemetry/sdk-metrics';
 import {
 	Meter,
 	ObservableGauge,
@@ -274,28 +271,7 @@ export class FillerBot implements Bot {
 			}
 		);
 		const meterName = this.name;
-		const meterProvider = new MeterProvider({
-			views: [
-				new View({
-					instrumentName: METRIC_TYPES.sdk_call_duration_histogram,
-					instrumentType: InstrumentType.HISTOGRAM,
-					meterName: meterName,
-					aggregation: new ExplicitBucketHistogramAggregation(
-						Array.from(new Array(20), (_, i) => 0 + i * 100),
-						true
-					),
-				}),
-				new View({
-					instrumentName: METRIC_TYPES.try_fill_duration_histogram,
-					instrumentType: InstrumentType.HISTOGRAM,
-					meterName: meterName,
-					aggregation: new ExplicitBucketHistogramAggregation(
-						Array.from(new Array(20), (_, i) => 0 + i * 5),
-						true
-					),
-				}),
-			],
-		});
+		const meterProvider = new MeterProvider();
 
 		meterProvider.addMetricReader(this.exporter);
 		this.meter = meterProvider.getMeter(meterName);
