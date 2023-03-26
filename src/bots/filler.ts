@@ -453,12 +453,16 @@ export class FillerBot implements Bot {
 			if (getVariant(actionRecord.action) === 'fill') {
 				const marketType = getVariant(actionRecord.marketType);
 				if (marketType === 'perp') {
-					if (PerpMarkets[this.runtimeSpec.driftEnv][actionRecord.marketIndex].symbol) {
-						this.observedFillsCountCounter.add(1, {
-							market:
-							PerpMarkets[this.runtimeSpec.driftEnv][actionRecord.marketIndex]
-								.symbol,
-						});
+					try {
+						if (PerpMarkets[this.runtimeSpec.driftEnv][actionRecord.marketIndex].symbol) {
+							this.observedFillsCountCounter.add(1, {
+								market:
+								PerpMarkets[this.runtimeSpec.driftEnv][actionRecord.marketIndex]
+									.symbol,
+							});
+						}
+					} catch (e) {
+						logger.error("Error increasing fill count counter", e);
 					}
 				}
 			}
