@@ -49,3 +49,11 @@ export function sign(params: Sign): { [key: string]: any } {
   header.headers['KC-API-KEY-VERSION'] = 2;
   return header;
 }
+
+export function convertPrice(price: number, precision: number): number {
+  // Calculate the factor by dividing 1 by the precision
+  const factor: number = 1 / precision;
+
+  // Round the price to the nearest multiple of the factor
+  return Math.round(price * factor) / factor;
+}

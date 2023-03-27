@@ -25,9 +25,7 @@ import {
   calculateBidAskPrice,
   Wallet,
   ZERO,
-  getMarketOrderParams,
   OptionalOrderParams,
-  OraclePriceData,
   WrappedEvent,
   EventMap,
 } from '@drift-labs/sdk';
@@ -48,7 +46,18 @@ import { KucoinController } from '../kucoin-api/kucoin';
 import { Order as KucoinOrder, OrderBook } from '../kucoin-api/models';
 import { PositionChangeOperationResponse } from '../kucoin-api/ws';
 import { Contract } from '../kucoin-api/market';
-import { INDEX_TO_LETTERS, INDEX_TO_NAME, INDEX_TO_SYMBOL, MaxSizeList, StateType, SYMBOL_TO_INDEX } from './utils';
+import {
+  calculateVolatility,
+  calculateVWCP,
+  INDEX_TO_LETTERS,
+  INDEX_TO_NAME,
+  INDEX_TO_SYMBOL,
+  MaxSizeList,
+  StateType,
+  SYMBOL_TO_INDEX
+} from './utils';
+import { DriftMarketData, KucoinMarketData } from './marketDataUtils';
+import { convertPrice } from '../kucoin-api/utils';
 
 type Action = {
   baseAssetAmount: BN;
@@ -58,23 +67,12 @@ type Action = {
   node: DLOBNode;
 };
 
-type ActionTake = {
-  baseAssetAmount: BN;
-  marketIndex: number;
-  direction: PositionDirection;
-};
-
-export type KucoinMarketData = {
-  book: OrderBook,
-  vwap: { bid: number, ask: number },
-  bestPrice: { bid: number, ask: number }
-}
-
 type State = {
   stateType: Map<number, StateType>;
   spotMarketPosition: Map<number, SpotPosition>;
   perpMarketPosition: Map<number, PerpPosition>;
   kucoinMarketData: Map<number, KucoinMarketData>;
+  driftMarketData: Map<number, DriftMarketData>;
   kucoinContract: Map<number, Contract>;
   positions: Map<number, { kucoin: number, drift: number }>;
   exchangeDeltaTime: Map<number, number>;
@@ -82,6 +80,10 @@ type State = {
   openOrders: Map<number, { kucoin: Map<string, KucoinOrder>, drift: Map<string, DriftOrder> }>;
   expectingOrderDataFrom: Map<number, string | undefined>;
   kucoinOpenOrderExposureList: Map<number, number>;
+  isActive: Map<number, boolean>;
+  volatility: Map<number, number>;
+  centerOfMass: Map<number, number>;
+
 };
 
 const dlobMutexError = new Error('dlobMutex timeout');
@@ -110,7 +112,7 @@ function sleep(ms: number): Promise<void> {
 export class JitMakerBot implements Bot {
   public readonly name: string;
   public readonly dryRun: boolean;
-  public readonly defaultIntervalMs: number = 1000;
+  public readonly defaultIntervalMs: number = 2000;
 
   private readonly driftClient: DriftClient;
   private slotSubscriber: SlotSubscriber;
@@ -137,9 +139,12 @@ export class JitMakerBot implements Bot {
   private bootTimeMs = Date.now();
   private runtimeSpecsGauge: ObservableGauge;
   private marketDataGauge: ObservableGauge;
+  private modelGauge: ObservableGauge;
+  private orderGauge: ObservableGauge;
   private readonly runtimeSpec: RuntimeSpec;
   private mutexBusyCounter: Counter;
   private errorCounter: Counter;
+  private actionCounter: Counter;
   private tryJitDurationHistogram: Histogram;
 
   private watchdogTimerMutex = new Mutex();
@@ -148,8 +153,8 @@ export class JitMakerBot implements Bot {
   private readonly MAX_POSITION_EXPOSURE;
   private kucoin: KucoinController;
 
-  private mutexes: { [id: number]: { kucoin: Mutex, long: Mutex, short: Mutex, jit: Mutex } };
-  private exchangeDelta: { [id: number]: number };
+  private readonly mutexes: { [id: number]: { kucoin: Mutex, long: Mutex, short: Mutex, jit: Mutex } };
+  private exchangeDelta: { [id: number]: number } = {};
   private readonly profitThreshold: { [id: number]: number };
   private readonly kucoinMakerFee: number;
   private maxTradeSize: { [id: number]: number } = {};
@@ -159,10 +164,12 @@ export class JitMakerBot implements Bot {
   private kucoinOpenOrderExposureList: { [id: number]: number } = {};
   private marketEnabled: number[] = [];
   private contractEnabled: string[] = [];
-
-  private isActive = false;
   private allInitDone = false;
   private tradeIndex = 0;
+  private targetPrices: Map<number, { kucoin: { buy: number, sell: number }, drift: { buy: number, sell: number } }>; // Target Price
+
+  // k1: volatility coefficient, k2: spread coefficient, k3: drift/kucoin coefficient, k4: risk appetite, k5: Maximum price drift, Weight of the model center point By VWAP
+  private readonly modelCoefficients: { k1: number, k2: number, k3: number, k4: number, k5: number, k6: number, k7: number };
 
   constructor(
     clearingHouse: DriftClient,
@@ -179,6 +186,10 @@ export class JitMakerBot implements Bot {
     this.kucoinMakerFee = config.kucoinMakerFee;
     this.profitThreshold = config.profitThreshold;
     this.MAX_POSITION_EXPOSURE = config.maxPositionExposure;
+    this.modelCoefficients = config.modelCoefficients;
+
+    this.mutexes = {};
+    this.targetPrices = new Map<number, { kucoin: { buy: number, sell: number }, drift: { buy: number, sell: number } }>();
 
     this.agentState = {
       stateType: new Map<number, StateType>(),
@@ -188,10 +199,14 @@ export class JitMakerBot implements Bot {
       expectingOrderDataFrom: new Map<number, string>(),
       kucoinOpenOrderExposureList: new Map<number, number>(),
       kucoinMarketData: new Map<number, KucoinMarketData>(),
+      driftMarketData: new Map<number, DriftMarketData>(),
       positions: new Map<number, { kucoin: number, drift: number }>(),
       kucoinContract: new Map<number, Contract>(),
       exchangeDeltaTime: new Map<number, number>(),
       deltaKucoinDrift: new Map<number, MaxSizeList>(),
+      isActive: new Map<number, boolean>(),
+      volatility: new Map<number, number>(),
+      centerOfMass: new Map<number, number>()
     };
 
     for (const i of [0, 1, 2, 3, 4, 5]) {
@@ -207,6 +222,7 @@ export class JitMakerBot implements Bot {
       this.coolingPeriod[i] = { jit: 0, kucoin: 0, long: 0, short: 0 };
       this.exchangeDelta[i] = 0;
       this.mutexes[i] = { jit: new Mutex(), short: new Mutex(), long: new Mutex(), kucoin: new Mutex() };
+      this.targetPrices.set(i, { kucoin: { buy: 0, sell: 0 }, drift: { buy: 0, sell: 0 } });
       this.agentState.deltaKucoinDrift.set(i, new MaxSizeList(20));
       this.agentState.exchangeDeltaTime.set(i, 0);
       this.agentState.positions.set(i, { kucoin: 0, drift: 0 });
@@ -214,6 +230,7 @@ export class JitMakerBot implements Bot {
       this.agentState.openOrders.set(i, { kucoin: new Map(), drift: new Map() });
       this.agentState.expectingOrderDataFrom.set(i, undefined);
       this.agentState.kucoinOpenOrderExposureList.set(i, 0);
+      this.agentState.isActive.set(i, false);
       logger.info(`${name} enabled`);
     }
 
@@ -266,6 +283,17 @@ export class JitMakerBot implements Bot {
       description: 'Count of errors',
     });
 
+    this.actionCounter = this.meter.createCounter('open_orders', {
+      description: 'Place order / Cancel order',
+    });
+
+    this.modelGauge = this.meter.createObservableGauge(
+      'model_gauge',
+      {
+        description: "Model Gauge"
+      }
+    );
+
     this.marketDataGauge = this.meter.createObservableGauge(
       'market_data',
       {
@@ -273,7 +301,16 @@ export class JitMakerBot implements Bot {
       }
     );
 
+    this.orderGauge = this.meter.createObservableGauge(
+      'order_data',
+      {
+        description: "All the order data"
+      }
+    );
+
     this.marketDataGauge.addCallback(obs => this.marketDataCallback(obs));
+    this.modelGauge.addCallback(obs => this.modelCallback(obs));
+    this.orderGauge.addCallback(obs => this.orderCallback(obs));
 
     this.runtimeSpecsGauge.addCallback((obs) => {
       obs.observe(this.bootTimeMs, this.runtimeSpec);
@@ -332,6 +369,36 @@ export class JitMakerBot implements Bot {
     }
   }
 
+  /*
+    Retrieve list of open order at launch
+   */
+  private async updateKucoinOpenOrders(): Promise<boolean> {
+    try {
+      const p = await this.kucoin.api.orderList({ type: "limit", status: 'active' });
+
+      for (const marketIndex of this.marketEnabled) {
+        const symbol = INDEX_TO_SYMBOL[marketIndex];
+        const orders = new Map<string, KucoinOrder>();
+        for (const o of p.data.items) {
+          if (o.symbol === symbol) {
+            const modifiedO: KucoinOrder = {
+              orderId: o.id, symbol: o.symbol, size: o.size.toPrecision(3), price: o.price,
+              orderType: o.type, status: o.status, exchange: 'kucoin', matchSize: o.filledSize.toPrecision(3), timestamp: o.orderTime,
+              side: o.side, matchLotSize: o.filledSize.toPrecision(3), lotSize: o.size.toPrecision(3)
+            };
+            orders.set(o.id, modifiedO);
+          }
+        }
+        this.agentState.openOrders.get(marketIndex).kucoin = orders;
+      }
+
+      return true;
+    } catch (error) {
+      console.error(`Error fetching open orders`);
+      return false;
+    }
+  }
+
   private async retryGetKucoinPositionAndLog(symbol: string, index: number): Promise<void> {
     let success = false;
     let retries = 0;
@@ -381,15 +448,25 @@ export class JitMakerBot implements Bot {
     const resp = await this.kucoin.api.accountOverview({ currency: 'USDT' });
     logger.info(`Kucoin account Balance + unrealised Pnl: ${resp.data.accountEquity}`);
 
+    // Get current open orders
+    await this.updateKucoinOpenOrders();
+
     // Lot size
     const contractList = await this.kucoin.api.contractList();
     for (const x of contractList.data) {
-
       if (this.contractEnabled.includes(x.symbol)) {
         const marketIndex = SYMBOL_TO_INDEX[x.symbol];
         logger.info(`Multiplier for ${x.symbol}: ${x.multiplier}`);
         this.agentState.kucoinContract.set(marketIndex, x);
         this.maxTradeSizeInLot[marketIndex] = Math.trunc(this.maxTradeSize[marketIndex] / x.multiplier);
+
+        // Prepare order book first
+        const orderBookResponse = await this.kucoin.api.orderBook({ symbol: x.symbol, depth: 'depth20' });
+        const asks: [number, number][] = orderBookResponse.data.asks.map(([price, volume]) => [parseFloat(price), volume]);
+        const bids: [number, number][] = orderBookResponse.data.asks.map(([price, volume]) => [parseFloat(price), volume]);
+        const ob = new OrderBook('kucoin', orderBookResponse.data.symbol, asks, bids);
+        this.agentState.kucoinMarketData.set(marketIndex, new KucoinMarketData(ob));
+        await sleep(500);
       }
     }
 
@@ -402,12 +479,12 @@ export class JitMakerBot implements Bot {
     this.kucoin.on('book', this.updateKucoinMarketData.bind(this));
     this.kucoin.on('positionOperationChange', this.updateKucoinPosition.bind(this));
     this.kucoin.on('order', this.updateKucoinOrder.bind(this));
+    await this.refreshDelta();
+    await this.updateTargetPrice();
+
   }
 
   public async init(): Promise<void> {
-
-    const intervalId = setInterval(this.refreshDelta.bind(this), 2000);
-    this.intervalIds.push(intervalId);
 
     logger.info(`${this.name} initiating`);
     const initPromises: Array<Promise<any>> = [];
@@ -433,10 +510,14 @@ export class JitMakerBot implements Bot {
       this.dlob.initFromUserMap(this.userMap, this.slotSubscriber.getSlot())
     );
 
-    initPromises.push(this.userMap.fetchAllUsers());
-
     await Promise.all(initPromises);
     logger.info(`All init done`);
+
+    // Start function running periodically
+    this.intervalIds.push(setInterval(this.refreshDelta.bind(this), 2000));
+    this.intervalIds.push(setInterval(this.updateTargetPrice.bind(this), 60000));
+    this.intervalIds.push(setInterval(this.control.bind(this), 3500));
+
     this.allInitDone = true;
   }
 
@@ -485,15 +566,68 @@ export class JitMakerBot implements Bot {
     }
   }
 
+  /**
+   * Update target price around which the open limit orders will be placed
+   */
+  private async updateTargetPrice() {
+    for (const marketIndex of this.marketEnabled) {
+      const symbol = INDEX_TO_SYMBOL[marketIndex];
+      const from = new Date().getTime() - 1000 * 60 * 60;
+
+      // Retrieve the past hour of data to calculate VWCP and Vol
+      const r = await this.kucoin.api.kline({ granularity: 1, symbol, from });
+      const vwcp = calculateVWCP(r);
+      const volatility = calculateVolatility(r);
+      this.agentState.volatility.set(marketIndex, volatility);
+
+      // Center of mass if how far we want our price target to be from the vwcp relatives to the current price
+      const centerOfMass = (vwcp * this.modelCoefficients.k6 + r.data[r.data.length - 1][4] * (1 - this.modelCoefficients.k6));
+      this.agentState.centerOfMass.set(marketIndex, centerOfMass);
+
+      // Adjust for Drift
+      const centerOfMassDrift = centerOfMass / this.exchangeDelta[marketIndex];
+
+      // Retrieving the exposure. We apply premium if we are currently exposed to one direction
+      // Only apply to drift
+      const driftPosition = Math.round(this.agentState.positions.get(marketIndex).drift);
+      const kucoinPosition = this.agentState.positions.get(marketIndex).kucoin;
+      const n = Math.trunc(driftPosition + kucoinPosition);
+      const premiumBuyDrift = this.modelCoefficients.k3 * (1 + Math.max(n, 0) * this.modelCoefficients.k7);
+      const premiumSellDrift = this.modelCoefficients.k3 * (1 - Math.min(n, 0) * this.modelCoefficients.k7);
+
+      // Take a new position if the total position is different from 0
+
+      const targets = { kucoin: { buy: 0, sell: 0 }, drift: { buy: 0, sell: 0 } };
+      targets.kucoin.buy = centerOfMass - volatility * this.modelCoefficients.k1;
+      targets.kucoin.sell = centerOfMass + volatility * this.modelCoefficients.k1;
+      targets.drift.buy = centerOfMassDrift - volatility / this.modelCoefficients.k1 * premiumBuyDrift;
+      targets.drift.sell = centerOfMassDrift + volatility / this.modelCoefficients.k1 * premiumSellDrift;
+      this.targetPrices.set(marketIndex, targets);
+      logger.info(`Target price updated`);
+      logger.info(`Kucoin: ${targets.kucoin.buy} / ${targets.kucoin.sell}`);
+      logger.info(`Drift: ${targets.drift.buy} / ${targets.drift.sell}`);
+      logger.debug(`Center of mass: ${centerOfMass} / volatility: ${volatility} / n ${n}`);
+      logger.debug(`Center of mass Drift: ${centerOfMassDrift} / premium Drift: ${premiumBuyDrift.toPrecision(5)} ${premiumSellDrift.toPrecision(5)}/ n ${n}`);
+    }
+  }
+
+  /**
+   * Update agent state with upcoming kucoin order book
+   */
   private updateKucoinMarketData(r: any) {
     const marketIndex = SYMBOL_TO_INDEX[r.data.symbol];
     if (this.marketEnabled.includes(marketIndex)) {
-      const newData: KucoinMarketData = {
-        book: r.data,
-        vwap: { bid: r.data.vwap('bids', 5), ask: r.data.vwap('asks', 5) },
-        bestPrice: { bid: r.data.bestBid(10), ask: r.data.bestAsk(10) }
-      };
-      this.agentState.kucoinMarketData.set(marketIndex, newData);
+      this.agentState.kucoinMarketData.set(marketIndex, new KucoinMarketData(r.data));
+    }
+  }
+
+  /**
+   * Update agent state with upcoming drift order book
+   */
+  private updateDriftMarketData(marketIndex: number) {
+    if (this.marketEnabled.includes(marketIndex)) {
+      const newData = new DriftMarketData(marketIndex, this.dlob, this.driftClient, this.slotSubscriber.getSlot());
+      this.agentState.driftMarketData.set(marketIndex, newData);
     }
   }
 
@@ -716,26 +850,44 @@ export class JitMakerBot implements Bot {
    * Provide the Kucoin price target to place limit order
    */
   private getKucoinPriceTarget(marketIndex: number, side: 'buy' | 'sell'): number {
-    // TODO: UPDATE
-    const marketData = this.agentState.kucoinMarketData.get(marketIndex);
-    // return side === "buy" ? this.bookKucoin[i]._bids[0][0] : this.bookKucoin[i]._asks[0][0];
-    return side === "buy" ? marketData.vwap.bid : marketData.vwap.ask;
+    return this.targetPrices.get(marketIndex).kucoin[side];
+  }
+
+  /**
+   * Provide the Drift price target to place limit order
+   */
+  private getDriftPriceTarget(marketIndex: number, side: 'buy' | 'sell'): number {
+    return this.targetPrices.get(marketIndex).drift[side];
   }
 
   /**
    * Provide the Kucoin price target to place limit order
    */
   private isPriceCloseToTargetKucoin(marketIndex: number, order: KucoinOrder): boolean {
-    // TODO: UPDATE
-    return Math.trunc(this.getKucoinPriceTarget(marketIndex, order.side) - +order.price) < 0.1;
+    const target = this.getKucoinPriceTarget(marketIndex, order.side);
+    const maxDelta = target * this.modelCoefficients.k5;
+    return order.side === 'buy' ? target - +order.price < maxDelta : +order.price - target < maxDelta;
+  }
+
+  /**
+   * Provide the Drift price target to place limit order
+   */
+  private isPriceCloseToTargetDrift(marketIndex: number, order: DriftOrder): boolean {
+    const side = isVariant(order.direction, 'long') ? 'buy' : 'sell';
+    const target = this.getDriftPriceTarget(marketIndex, side);
+    const maxDelta = target * this.modelCoefficients.k5;
+    const price = convertToNumber(order.price, PRICE_PRECISION);
+    return side === 'buy' ? target - price < maxDelta : price - target < maxDelta;
   }
 
   /**
    * Cancel Order
    */
-  private cancelKucoinOrder(marketIndex: number, orderId: string): void {
+  private cancelKucoinOrder(marketIndex: number, orderId: string, side: 'buy' | 'sell'): void {
     const now = (new Date()).getTime();
     this.coolingPeriod[marketIndex].kucoin = now + 3000;
+    const name = INDEX_TO_NAME[marketIndex];
+    this.actionCounter.add(1, { type: 'cancel', side, exchange: 'kucoin', market: name });
     if (!this.dryRun) {
       this.kucoin.api.cancelOrder({ orderId }).then(r => {
         if (r.code === "200000") {
@@ -757,8 +909,10 @@ export class JitMakerBot implements Bot {
    */
   private placeKucoinOrder(marketIndex: number, side: 'buy' | 'sell', symbol: string, price: number, size: number): void {
     const now = (new Date()).getTime();
+    const name = INDEX_TO_NAME[marketIndex];
     const clientOid = `${symbol}-${(new Date()).getTime()}`;
     this.coolingPeriod[marketIndex].kucoin = now + 3000;
+    this.actionCounter.add(1, { type: 'place', side, exchange: 'kucoin', market: name });
     if (!this.dryRun) {
       this.kucoin.api.placeLimitOrder({
         symbol,
@@ -812,17 +966,26 @@ export class JitMakerBot implements Bot {
       // If no open order -> Place one limit order
       if (orderList.size > 1) {
 
-        const orderId = orderList.keys().next().value;
+        const [orderId, order] = orderList.entries().next().value;
         // There should always be only one Kucoin order at the same time. If there is more than one. Cancel one
         logger.info(`Cancel order ${orderId} because too many positions are opened`);
-        this.cancelKucoinOrder(marketIndex, orderId);
+        this.cancelKucoinOrder(marketIndex, orderId, order.side);
       } else if (Math.trunc(Math.abs(delta)) > 0) {
 
         // If position smaller than 0.5 do not update the position as you wont be able to take the position on kucoin
         const orderList = this.agentState.openOrders.get(marketIndex).kucoin;
         if (orderList.size === 0) {
           const side = delta > 0 ? 'sell' : 'buy';
-          const price = this.getKucoinPriceTarget(marketIndex, side);
+          let price = this.getKucoinPriceTarget(marketIndex, side);
+
+          // Make sure to not post an order that can be filled immediately
+          const marketData = this.agentState.kucoinMarketData.get(marketIndex);
+          price = side === 'buy' ? Math.min(price, marketData.bestPrice.bid) : Math.max(price, marketData.bestPrice.ask);
+
+          // Convert price into a valid Kucoin price
+          const tickSize = this.agentState.kucoinContract.get(marketIndex).tickSize;
+          price = convertPrice(price, tickSize);
+
           const size = Math.trunc(Math.abs(delta));
 
           logger.info(`Hedging ${symbol} Open position, taking order ${side} ${Math.abs(delta)}`);
@@ -830,10 +993,10 @@ export class JitMakerBot implements Bot {
 
         } else {
 
-          const orderId = orderList.keys().next().value;
+          const [orderId, order] = orderList.entries().next().value;
           // If the exposure is non-zero, cancel the order so that a new one can be bplaced
-            logger.debug(`Cancel order ${orderId} due to exposure change`);
-            this.cancelKucoinOrder(marketIndex, orderId);
+          logger.debug(`Cancel order ${orderId} due to exposure change`);
+          this.cancelKucoinOrder(marketIndex, orderId, order.side);
         }
       } else if (orderList.size === 1) {
 
@@ -843,7 +1006,7 @@ export class JitMakerBot implements Bot {
 
           // Verify that the current price is not too far from the open order price otherwise cancel
           logger.debug(`Cancel order ${orderId} due to position change`);
-          this.cancelKucoinOrder(marketIndex, orderId);
+          this.cancelKucoinOrder(marketIndex, orderId, order.side);
         }
       }
     } finally {
@@ -851,8 +1014,17 @@ export class JitMakerBot implements Bot {
     }
   }
 
+  /**
+   * Place limit order
+   */
   private async placeDriftOrder(orderParams: OptionalOrderParams) {
     const name = INDEX_TO_NAME[orderParams.marketIndex];
+    this.actionCounter.add(1, {
+      type: 'place',
+      side: isVariant(orderParams.direction, 'long') ? 'buy' : 'sell',
+      exchange: 'drift',
+      market: name
+    });
     try {
       if (!this.dryRun) {
         const tx = await this.driftClient.placePerpOrder(orderParams);
@@ -869,9 +1041,9 @@ export class JitMakerBot implements Bot {
         );
       }
       if (isVariant(orderParams.direction, 'long')) {
-        this.coolingPeriod[orderParams.marketIndex].long = new Date().getTime() + 2000;
+        this.coolingPeriod[orderParams.marketIndex].long = new Date().getTime() + 4000;
       } else {
-        this.coolingPeriod[orderParams.marketIndex].short = new Date().getTime() + 2000;
+        this.coolingPeriod[orderParams.marketIndex].short = new Date().getTime() + 4000;
       }
     } catch (e) {
       logger.error(`${name} Error placing a long order`);
@@ -879,9 +1051,13 @@ export class JitMakerBot implements Bot {
     }
   }
 
+  /**
+   * Cancel limit order
+   */
   private async cancelDriftOrder(orderId: number, marketIndex: number, isLong: boolean) {
     const name = INDEX_TO_NAME[marketIndex];
     try {
+      this.actionCounter.add(1, { type: 'cancel', side: isLong ? 'buy' : 'sell', exchange: 'drift', market: name });
       if (!this.dryRun) {
         const tx = await this.driftClient.cancelOrder(orderId);
         logger.info(
@@ -898,130 +1074,82 @@ export class JitMakerBot implements Bot {
       }
 
       if (isLong) {
-        this.coolingPeriod[marketIndex].long = new Date().getTime() + 2000;
+        this.coolingPeriod[marketIndex].long = new Date().getTime() + 4000;
       } else {
-        this.coolingPeriod[marketIndex].short = new Date().getTime() + 2000;
+        this.coolingPeriod[marketIndex].short = new Date().getTime() + 4000;
       }
     } catch (e) {
       logger.error(`${name} Error cancelling an long order ${orderId}`);
     }
   }
 
-  private async updateLimitForClosingPosition(marketIndex: number, isLong: boolean, orders: DriftOrder[], bestBidBn: BN, bestAskBn: BN, oracle: OraclePriceData) {
-    // const name = INDEX_TO_NAME[marketIndex];
-    // const biasNum = new BN(100);
-    // const biasDenom = new BN(100);
-    // const oracleSpread = isLong ? oracle.price.sub(bestBidBn) : bestAskBn.sub(oracle.price);
-    const offset = isLong ? bestBidBn.sub(oracle.price) : bestAskBn.sub(oracle.price);
-    // console.log(convertToNumber(offset, PRICE_PRECISION), convertToNumber(oracleSpread, PRICE_PRECISION));
-    if (orders.length === 1) {
-      // const order = orders[0];
-      // const currentPrice = convertToNumber(order.price, PRICE_PRECISION);
-      // if (Math.abs(targetPrice - currentPrice) > this.priceDistanceBeforeUpdateLimit[marketIndex] || !oracle.hasSufficientNumberOfDataPoints) {
-      //   logger.info(`${name} Cancelling limit price of ${isLong ? 'long' : 'short'} order $${targetPrice}`);
-      //   logger.info(`Has Sufficient datapoint: ${oracle.hasSufficientNumberOfDataPoints} - confidence: ${oracle.confidence} - oracle: ${oraclePrice} - order: ${currentPrice} target Price: ${targetPrice}`);
-      //   await this.cancelOrder(order.orderId, marketIndex, isLong);
-      //   return;
-      // }
-    } else if (!oracle.hasSufficientNumberOfDataPoints) {
-      return;
-    } else {
-      const size = new BN(Math.round(this.positionDrift[marketIndex] * this.futureKucoinContract[marketIndex].multiplier) * BASE_PRECISION.toNumber());
-      logger.info(`Placing closing short limit order`);
-      logger.info(` .        oracleSlot:  ${oracle.slot.toString()}`);
-      logger.info(` .        oracleConf:  ${oracle.confidence.toString()}`);
+  /**
+   * Maintain the open order to 1 per side and close to the target price
+   */
+  private async processDriftBySide(openOrders: DriftOrder[], marketIndex: number, direction: 'long' | 'short', currentState: StateType) {
 
-      await this.placeOrder({
-        marketIndex: marketIndex,
-        orderType: OrderType.LIMIT,
-        direction: isLong ? PositionDirection.LONG : PositionDirection.SHORT,
-        baseAssetAmount: size,
-        oraclePriceOffset: offset.toNumber(),
-        postOnly: PostOnlyParams.MUST_POST_ONLY
-      });
-    }
-  }
-
-  private async updateLimitForTakingRisk(marketIndex: number, isLong: boolean, orders: DriftOrder[], bestBidBn: BN, bestAskBn: BN) {
-    const name = INDEX_TO_NAME[marketIndex];
-
-    if (this.vwapKucoin[marketIndex].asks === 0 || this.vwapKucoin[marketIndex].bids === 0) return;
-
-    const factor = this.exchangeDelta[marketIndex];
-    const kucoinAskAdjusted = this.vwapKucoin[marketIndex].asks / factor;
-    const kucoinBidAdjusted = this.vwapKucoin[marketIndex].bids / factor;
-
-    const pt = this.profitThreshold[marketIndex];
-    const driftBid = convertToNumber(bestBidBn, PRICE_PRECISION);
-    const driftAsk = convertToNumber(bestAskBn, PRICE_PRECISION);
-
-    let acceptablePrice = isLong ? kucoinAskAdjusted / (1 + this.kucoinTakerFee + pt) : (1 + this.kucoinTakerFee + pt) * kucoinBidAdjusted;
-    if (isLong && acceptablePrice > driftBid && bestBidBn.lt(bestAskBn)) {
-      acceptablePrice = driftBid;
-    } else if (!isLong && driftAsk < driftAsk && bestBidBn.lt(bestAskBn)) {
-      acceptablePrice = driftAsk;
-    }
-
-    if (orders.length === 1) {
-      const order = orders[0];
-      const currentPrice = convertToNumber(order.price, PRICE_PRECISION);
-      if (Math.abs(acceptablePrice - currentPrice) > this.priceDistanceBeforeUpdateLimit[marketIndex]) {
-        logger.info(`${name} Cancelling limit price of ${isLong ? "long" : "short"} order $${acceptablePrice}`);
-        await this.cancelOrder(order.orderId, marketIndex, isLong);
-        return;
-      }
-    } else if (this.deltaKucoinDrift[marketIndex].getItems().length > 5) {
-      const newPrice = new BN(acceptablePrice * PRICE_PRECISION.toNumber());
-      const currentPositionToAdd = this.positionDrift[marketIndex] - Math.trunc(this.positionDrift[marketIndex]);
-
-      const size = new BN((this.maxTradeSize[marketIndex] - currentPositionToAdd) * BASE_PRECISION.toNumber());
-      logger.info(`${name} 📝 Placing limit price of ${isLong ? "long" : "short"} order $${acceptablePrice}`);
-      await this.placeOrder({
-        marketIndex: marketIndex,
-        orderType: OrderType.LIMIT,
-        direction: isLong ? PositionDirection.LONG : PositionDirection.SHORT,
-        baseAssetAmount: size,
-        price: newPrice,
-        postOnly: PostOnlyParams.MUST_POST_ONLY,
-      });
-    }
-
-  }
-
-  private async updateLimit(openOrders: DriftOrder[], marketIndex: number, direction: 'long' | 'short', currentState: StateType) {
     const name = INDEX_TO_NAME[marketIndex];
     const isLong = direction === 'long';
-    const mutex = isLong ? this.takingLimitPositionLongMutexes[marketIndex] : this.takingLimitPositionShortMutexes[marketIndex];
-    const coolingPeriod = isLong ? this.coolingLimitLongPeriod[marketIndex] : this.coolingLimitShortPeriod[marketIndex];
+
+    const mutex = isLong ? this.mutexes[marketIndex].long : this.mutexes[marketIndex].short;
+    const coolingPeriod = isLong ? this.coolingPeriod[marketIndex].long : this.coolingPeriod[marketIndex].short;
     if (mutex.isLocked() || coolingPeriod > new Date().getTime()) {
       return;
     }
     const release = await mutex.acquire();
     try {
+
       const orders = openOrders.filter(item => isVariant(item.direction, direction));
-      if (orders.length > 1 || (orders.length === 1 && ((!isLong && currentState === StateType.CLOSING_SHORT) || (isLong && currentState === StateType.CLOSING_LONG)))) {
+      if (orders.length > 1) {
+
+        // Only 1 open order allowed
         logger.info(`${name} - ${isLong ? "long" : "short"} - Closing order because there are too many`);
-        await this.cancelOrder(orders[0].orderId, marketIndex, isLong);
-        return;
-      }
+        await this.cancelDriftOrder(orders[0].orderId, marketIndex, isLong);
+      } else if (orders.length === 1 && !isLong && currentState === StateType.CLOSING_SHORT) {
 
-      if (this.exchangeDelta[marketIndex] === 0) {
-        return;
-      }
+        // Short open position not allowed if state is closing short
+        logger.info(`${name} - ${isLong ? "long" : "short"} - Closing short order because we are in closing short mode`);
+        await this.cancelDriftOrder(orders[0].orderId, marketIndex, isLong);
+      } else if (orders.length === 1 && isLong && currentState === StateType.CLOSING_LONG) {
 
-      const oracle = this.driftClient.getOracleDataForPerpMarket(marketIndex);
-      const [bid, ask] = calculateBidAskPrice(
-        this.driftClient.getPerpMarketAccount(marketIndex).amm,
-        this.driftClient.getOracleDataForPerpMarket(marketIndex)
-      );
+        // Long open position not allowed if state is closing long
+        logger.info(`${name} - ${isLong ? "long" : "short"} -  Closing long order because we are in closing long mode`);
+        await this.cancelDriftOrder(orders[0].orderId, marketIndex, isLong);
+      } else if (orders.length === 1) {
 
-      const bestAskBn = this.dlob.getBestAsk(marketIndex, ask, this.slotSubscriber.getSlot(), MarketType.PERP, oracle);
-      const bestBidBn = this.dlob.getBestBid(marketIndex, bid, this.slotSubscriber.getSlot(), MarketType.PERP, oracle);
+        // Verify that the open order is close enough to the target price otherwise cancel it
+        const order = orders.values().next().value;
+        if (!this.isPriceCloseToTargetDrift(marketIndex, order)) {
 
-      if ((currentState === StateType.CLOSING_LONG && !isLong) || (currentState === StateType.CLOSING_SHORT && isLong)) {
-        await this.updateLimitForClosingPosition(marketIndex, isLong, orders, bestBidBn, bestAskBn, oracle);
-      } else if (currentState && currentState !== StateType.CLOSING_LONG && currentState !== StateType.CLOSING_SHORT && currentState !== StateType.NOT_STARTED) {
-        await this.updateLimitForTakingRisk(marketIndex, isLong, orders, bestBidBn, bestAskBn);
+          logger.info(`${name} - ${isLong ? "long" : "short"} -  Price is now too far from target drift price`);
+          await this.cancelDriftOrder(orders[0].orderId, marketIndex, isLong);
+        }
+      } else {
+
+        if ((currentState === StateType.CLOSING_LONG && isLong) || (currentState === StateType.CLOSING_SHORT && !isLong)) {
+          return;
+        }
+
+        // Get the target price and place limit order
+        let targetPrice = this.getDriftPriceTarget(marketIndex, isLong ? 'buy' : 'sell');
+
+        // Make sure to not post an order that can be filled immediately
+        const marketData = this.agentState.driftMarketData.get(marketIndex);
+        targetPrice = isLong ? Math.min(targetPrice, marketData.bestPrice.bid) : Math.max(targetPrice, marketData.bestPrice.ask);
+
+        const targetPriceBn = new BN(targetPrice * PRICE_PRECISION.toNumber());
+        const size = new BN(this.maxTradeSize[marketIndex] * BASE_PRECISION.toNumber());
+
+        logger.info(`${name} 📝 Placing limit price of ${isLong ? "long" : "short"} order $${targetPrice}`);
+
+        await this.placeDriftOrder({
+          marketIndex: marketIndex,
+          orderType: OrderType.LIMIT,
+          direction: isLong ? PositionDirection.LONG : PositionDirection.SHORT,
+          baseAssetAmount: size,
+          price: targetPriceBn,
+          postOnly: PostOnlyParams.MUST_POST_ONLY,
+        });
       }
 
     } catch (e) {
@@ -1033,20 +1161,22 @@ export class JitMakerBot implements Bot {
 
   }
 
-  private async checkAndUpdateLimitOrders(marketIndex: number) {
+  /**
+   * Processing the limit orders
+   */
+  private async processDrift(marketIndex: number) {
 
-    if (!this.isActive) return;
-    const openOrders = this.agentState.openOrders.get(marketIndex) ?? [];
-
-    if (this.kucoin.handlers[INDEX_TO_SYMBOL[marketIndex]].lastRcv < (new Date().getTime() - 2000)) return;
+    const openOrderMap = this.agentState.openOrders.get(marketIndex).drift ?? new Map<string, DriftOrder>();
     const currentState = this.agentState.stateType.get(marketIndex);
+    const openOrders = [...openOrderMap.values()];
+
     await Promise.all([
-      this.updateLimit(openOrders, marketIndex, 'long', currentState),
-      this.updateLimit(openOrders, marketIndex, 'short', currentState)
+      this.processDriftBySide(openOrders, marketIndex, 'long', currentState),
+      this.processDriftBySide(openOrders, marketIndex, 'short', currentState)
     ]);
   }
 
-  /**
+  /*
    * Draws an action based on the current state of the bot.
    *
    */
@@ -1072,6 +1202,9 @@ export class JitMakerBot implements Bot {
           continue;
         }
 
+        const orderId = nodeToFill.node.order.orderId;
+        const userAccount = nodeToFill.node.userAccount.toBase58();
+
         const startPrice = convertToNumber(
           nodeToFill.node.order.auctionStartPrice,
           PRICE_PRECISION
@@ -1081,7 +1214,9 @@ export class JitMakerBot implements Bot {
           PRICE_PRECISION
         );
 
-        const kucoinBook = this.bookKucoin[marketIndex];
+        const kucoinMarketData = this.agentState.kucoinMarketData.get(marketIndex);
+
+        const kucoinBook = kucoinMarketData.book;
 
         if (!kucoinBook) {
           logger.error(
@@ -1095,167 +1230,97 @@ export class JitMakerBot implements Bot {
           continue;
         }
 
-        const baseAmountToBeFilled = nodeToFill.node.order.baseAssetAmount.sub(
-          nodeToFill.node.order.baseAssetAmountFilled
-        );
-        const kucoinLotSize = this.futureKucoinContract[marketIndex].multiplier;
-
-        const amountAvailable = convertToNumber(baseAmountToBeFilled, BASE_PRECISION);
-        const maxSizeInLot = this.maxTradeSizeInLot[marketIndex];
-        if (amountAvailable < kucoinLotSize) continue;
-
-        const amountAvailableInLot = Math.trunc(amountAvailable / kucoinLotSize);
-        const amountToTakeInLot = Math.min(maxSizeInLot, amountAvailableInLot);
-        const baseFillAmountNumber = amountToTakeInLot * kucoinLotSize;
-        const jitMakerBaseAssetAmount = new BN(
-          baseFillAmountNumber * BASE_PRECISION.toNumber()
-        );
-
-        const amount = convertToNumber(jitMakerBaseAssetAmount, BASE_PRECISION);
-        if (amount === 0) {
-          continue;
-        }
-        const amountToFill = convertToNumber(nodeToFill.node.order.baseAssetAmount, BASE_PRECISION);
-        const amountFilled = convertToNumber(nodeToFill.node.order.baseAssetAmountFilled, BASE_PRECISION);
-
-        const askKucoin = kucoinBook.bestAsk(amount);
-        const bidKucoin = kucoinBook.bestBid(amount);
-
-        if (this.exchangeDelta[marketIndex] === 0) {
-          continue;
-        }
-
-        const factor = this.exchangeDelta[marketIndex];
-
-        const askKucoinUsdc = askKucoin / factor;
-        const bidKucoinUsdc = bidKucoin / factor;
-
+        // Verify that there is no problem with the auction prices
         if (endPrice < 0 || startPrice < 0) continue;
-        if (askKucoinUsdc * 2 < endPrice || bidKucoinUsdc / 2 > endPrice) continue;
 
-        // calculate jit maker order params
+        // Verify that we are not processing the auction too late
+        const aucDur = nodeToFill.node.order.auctionDuration;
+        const orderSlot = nodeToFill.node.order.slot.toNumber();
+        const currSlot = this.slotSubscriber.getSlot();
+        const aucEnd = orderSlot + aucDur;
+        if (currSlot >= aucEnd) {
+          logger.warn(`${orderId} - Processing error too late delta between curr slot and aucEnd: ${currSlot - aucEnd}`);
+          continue;
+        }
+
+        // Skip if auction is long and state is reduce_long or auction is short and state is reduce_short
         const orderDirection = nodeToFill.node.order.direction;
         const jitMakerDirection = isVariant(orderDirection, 'long')
           ? PositionDirection.SHORT
           : PositionDirection.LONG;
 
+        const isLong = isVariant(orderDirection, 'short');
+
         const currentState = this.agentState.stateType.get(marketIndex);
-        if (this.RESTRICT_POSITION_SIZE) {
-          if (
-            currentState === StateType.CLOSING_LONG &&
-            jitMakerDirection === PositionDirection.LONG
-          ) {
-            continue;
-          }
-          if (
-            currentState === StateType.CLOSING_SHORT &&
-            jitMakerDirection === PositionDirection.SHORT
-          ) {
-            continue;
-          }
+        if (currentState === StateType.CLOSING_LONG && isLong) {
+          continue;
         }
-
-        this.tradeIndex += 1;
-        const idx = this.tradeIndex;
-
-        logger.info(
-          `${idx} - node slot: ${
-            nodeToFill.node.order.slot
-          }, cur slot: ${this.slotSubscriber.getSlot()}`
-        );
-        this.orderLastSeenBaseAmount.set(
-          getOrderSignature(
-            nodeToFill.node.order.orderId,
-            nodeToFill.node.userAccount
-          ),
-          nodeToFill.node.order.baseAssetAmountFilled
-        );
-
-        logger.info(
-          `${idx} - quoting order for node: ${nodeToFill.node.userAccount.toBase58()} - ${nodeToFill.node.order.orderId.toString()}, orderBaseFilled: ${convertToNumber(
-            nodeToFill.node.order.baseAssetAmountFilled,
-            BASE_PRECISION
-          )}/${convertToNumber(
-            nodeToFill.node.order.baseAssetAmount,
-            BASE_PRECISION
-          )}`
-        );
-
-        const orderSlot = nodeToFill.node.order.slot.toNumber();
-        const currSlot = this.slotSubscriber.getSlot();
-        const aucDur = nodeToFill.node.order.auctionDuration;
-        const aucEnd = orderSlot + aucDur;
-        let pt = this.profitThreshold[marketIndex];
-        let takePosition = false;
-        let offeredPrice = 0;
-        let virtualPnLRel = 0;
-        let positionOnDrift = '';
-        let bestKucoinValue;
-        let acceptablePrice = 0;
-        if (jitMakerDirection === PositionDirection.LONG) {
-          if (currentState === StateType.CLOSING_SHORT) pt = this.profitThresholdIfReduce[marketIndex];
-          acceptablePrice = bidKucoinUsdc / (1 + this.kucoinTakerFee + pt);
-          offeredPrice = Math.min(startPrice, acceptablePrice);
-          virtualPnLRel = bidKucoinUsdc / offeredPrice - 1 - this.kucoinTakerFee;
-          bestKucoinValue = bidKucoinUsdc;
-          positionOnDrift = 'long';
-          if (acceptablePrice >= endPrice) {
-            takePosition = true;
-          } else {
-            virtualPnLRel = bidKucoinUsdc / endPrice - 1 - this.kucoinTakerFee;
-          }
-        } else {
-          if (currentState === StateType.CLOSING_LONG) pt = this.profitThresholdIfReduce[marketIndex];
-          acceptablePrice = (1 + this.kucoinTakerFee + pt) * askKucoinUsdc;
-          offeredPrice = Math.max(startPrice, acceptablePrice);
-          bestKucoinValue = askKucoinUsdc;
-          virtualPnLRel = offeredPrice / askKucoinUsdc - 1 - this.kucoinTakerFee;
-          positionOnDrift = 'short';
-          if (acceptablePrice <= endPrice) {
-            takePosition = true;
-          } else {
-            virtualPnLRel = endPrice / askKucoinUsdc - 1 - this.kucoinTakerFee;
-          }
-        }
-
-        logger.info(`${idx} - New Auction found on ${INDEX_TO_NAME[market.marketIndex]} : Taker is ${positionOnDrift === "long" ? "⬇️" : "⬆️"}️ / Maker is ${positionOnDrift === "long" ? "⬆️️" : "⬇️"}️ start price: ${startPrice.toFixed(4)} slot: ${currSlot} / end price: ${endPrice.toFixed(4)} slot: ${aucEnd}`);
-        logger.info(`${idx} - Start price: ${startPrice.toFixed(4)} slot: ${currSlot} / End price: ${endPrice.toFixed(4)} slot: ${aucEnd}`);
-        logger.info(`${idx} - Amount: ${amount} / Total to fill: ${amountToFill} / Already filled: ${amountFilled}`);
-        logger.info(`${idx} - Kucoin Adjusted: Bid ${bidKucoinUsdc.toFixed(4)} Ask ${askKucoinUsdc.toFixed(4)}, factor: ${factor}`);
-        logger.info(`${idx} - Kucoin: Bid ${bidKucoin.toFixed(4)} Ask ${askKucoin.toFixed(4)}`);
-        const virtualPnL = amount * virtualPnLRel * offeredPrice;
-
-        if (currSlot >= aucEnd) {
-          logger.warn(`${idx} - Processing error too late delta between curr slot and aucEnd: ${currSlot - aucEnd}`);
+        if (currentState === StateType.CLOSING_SHORT && !isLong) {
           continue;
         }
 
-        logger.debug(`${idx} - aucend - currslot ${aucEnd - currSlot}`);
+        // Get the amount to be filled
+        const baseAmountToBeFilled = nodeToFill.node.order.baseAssetAmount.sub(
+          nodeToFill.node.order.baseAssetAmountFilled
+        );
+        const amountAvailable = convertToNumber(baseAmountToBeFilled, BASE_PRECISION);
+        const amount = Math.min(amountAvailable, this.maxTradeSize[marketIndex]);
+        const jitMakerBaseAssetAmount = new BN(amount * BASE_PRECISION.toNumber());
 
-        if (takePosition) {
-          logger.info(`${idx} - Bidding this auction ${positionOnDrift} at: ${offeredPrice.toFixed(4)}, hedge on Kucoin for ${bestKucoinValue}`);
-          logger.info(`${idx} - Virtual PnL: $ ${virtualPnL.toFixed(2)} / ${(virtualPnLRel * 100).toFixed(2)}%`);
+        if (amount <= 0) {
+          continue;
+        }
 
-          const mutex = this.takingPositionMutexes[marketIndex];
-          const offeredPriceBn = new BN(offeredPrice * PRICE_PRECISION.toNumber());
+        const amountToFill = convertToNumber(nodeToFill.node.order.baseAssetAmount, BASE_PRECISION);
+        const amountFilled = convertToNumber(nodeToFill.node.order.baseAssetAmountFilled, BASE_PRECISION);
+
+        const targetPrice = this.getDriftPriceTarget(marketIndex, isLong ? 'buy' : 'sell');
+
+        if ((isLong && targetPrice > startPrice * 3) || (!isLong && targetPrice < startPrice * 3)) {
+          continue;
+        }
+
+        logger.info(`${orderId} - New Auction found on ${INDEX_TO_NAME[market.marketIndex]} : ${isLong ? "⬆️️" : "⬇️"}️ start price: ${startPrice.toFixed(4)} slot: ${currSlot} / end price: ${endPrice.toFixed(4)} slot: ${aucEnd}`);
+        logger.info(`${orderId} - Price target: ${targetPrice}`);
+        logger.info(`${orderId} - Amount: ${amount} / Total to fill: ${amountToFill} / Already filled: ${amountFilled}`);
+        logger.info(`${orderId} - node slot: ${orderSlot}, cur slot: ${currSlot}`);
+        logger.info(`${orderId} - quoting order for node: ${userAccount} - ${orderId}, orderBaseFilled: ${amountFilled}/${amountToFill}`);
+
+        if ((isLong && targetPrice >= endPrice) || (!isLong && targetPrice <= endPrice)) {
+
+          // If Drift Target price is better than endPrice then we consider bidding for it
+          this.orderLastSeenBaseAmount.set(
+            getOrderSignature(
+              nodeToFill.node.order.orderId,
+              nodeToFill.node.userAccount
+            ),
+            nodeToFill.node.order.baseAssetAmountFilled
+          );
+
+          // Do not bid for a price worse than startPrice
+          const biddingPrice = isLong ? Math.min(targetPrice, startPrice) : Math.max(targetPrice, startPrice);
+
+          logger.info(`${orderId} - Bidding this auction ${biddingPrice.toFixed(4)}`);
+          const mutex = this.mutexes[marketIndex].jit;
           if (mutex.isLocked()) {
-            logger.info(`${idx} - ❌ Client is locked - skipping`);
+            logger.info(`${orderId} - ❌ Client is locked - skipping`);
             continue;
           }
 
           const release = await mutex.acquire();
           try {
-
+            const biddingPriceBn = new BN(biddingPrice * PRICE_PRECISION.toNumber());
+            this.tradeIndex += 1;
             const txSig = await this.executeAction({
               baseAssetAmount: jitMakerBaseAssetAmount,
               marketIndex: nodeToFill.node.order.marketIndex,
               direction: jitMakerDirection,
-              price: offeredPriceBn,
+              price: biddingPriceBn,
               node: nodeToFill.node,
-            }, idx);
+            }, this.tradeIndex);
 
-            this.coolingPeriod[marketIndex] = new Date().getTime() + 6000;
-            logger.info(`${idx} - ✅ JIT auction submitted (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}), Tx: ${txSig}`);
+            this.coolingPeriod[marketIndex].jit = new Date().getTime() + 6000;
+            logger.info(`${orderId} - ✅ JIT auction submitted (account: ${userAccount}), Tx: ${txSig}`);
           } catch (e) {
             nodeToFill.node.haveFilled = false;
 
@@ -1267,14 +1332,13 @@ export class JitMakerBot implements Bot {
               this.errorCounter.add(1, { errorCode: errorCode.toString() });
 
               if (errorCode === 6061) {
-                logger.warn(`${idx} - ❌ JIT auction (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()}): too late, offer dont exists anymore`);
+                logger.warn(`${orderId} - ❌ JIT auction (account: ${userAccount}: too late, offer dont exists anymore`);
               } else {
-                logger.error(
-                  `${idx} - ❌ Error (${errorCode}) filling JIT auction (account: ${nodeToFill.node.userAccount.toString()} - ${nodeToFill.node.order.orderId.toString()})`
-                );
+                console.log(e);
+                logger.error(`${orderId} - ❌ Error (${errorCode}) filling JIT auction (account: ${userAccount})`);
               }
             } else {
-              logger.error(`${idx} - ❌ Error Other error while doing transaction`);
+              logger.error(`${orderId} - ❌ Error Other error while doing transaction`);
               console.log(e);
             }
 
@@ -1283,7 +1347,7 @@ export class JitMakerBot implements Bot {
             release();
           }
         } else {
-          logger.info(`${idx} - ⛔ Skip offering, acceptable price ${acceptablePrice} - Pnl would be ${(virtualPnLRel * 100).toFixed(2)}% below the limit ${(pt * 100).toFixed(2)}%`);
+          logger.info(`${orderId} - ⛔ Skip offering, acceptable price ${targetPrice} while best price is ${endPrice}`);
         }
       }
     } catch (e) {
@@ -1378,82 +1442,20 @@ export class JitMakerBot implements Bot {
     }
   }
 
-  private async executeTakeAction(action: ActionTake, tradeIdx: number):
-    Promise<TransactionSignature> {
-
-    const t1 = (new Date()).getTime();
-
-    const orderParams = getMarketOrderParams({
-      direction: action.direction,
-      baseAssetAmount: action.baseAssetAmount,
-      reduceOnly: false,
-      marketIndex: action.marketIndex,
-    });
-
-    const ix = await this.driftClient.getPlacePerpOrderIx(orderParams);
-
-    const t2 = (new Date()).getTime();
-
-    const ixSetComputeUniteLimit = ComputeBudgetProgram.setComputeUnitLimit({
-      units: COMPUTE_UNITS,
-    });
-
-    const provider = this.driftClient.provider;
-    const connection = this.driftClient.connection;
-    const latestBlockhash = await connection.getLatestBlockhash('confirmed');
-    const t3 = (new Date()).getTime();
-    logger.debug(`t1 -> t2: ${t2 - t1} ms, t2 -> t3: ${t3 - t2} ms`);
-    const message = new TransactionMessage({
-      payerKey: provider.publicKey,
-      recentBlockhash: latestBlockhash.blockhash,
-      instructions: [ixSetComputeUniteLimit, ix]
-    }).compileToV0Message();
-
-    const transaction = new VersionedTransaction(message);
-    transaction.sign([(provider.wallet as Wallet).payer]);
-
-    logger.info(`${tradeIdx} - Sending Take transaction...`);
-
-    if (!this.dryRun) {
-      const sig = await connection.sendTransaction(transaction, { maxRetries: 2 });
-
-      logger.info(`${tradeIdx} - Transaction sent, pending confirmation, sig ${sig}`);
-
-      const confirmation = await connection.confirmTransaction({
-        signature: sig,
-        blockhash: latestBlockhash.blockhash,
-        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight
-      }, 'confirmed');
-
-      if (confirmation.value && confirmation.value.err) {
-        throw confirmation.value.err;
-      }
-
-      this.driftClient.perpMarketLastSlotCache.set(orderParams.marketIndex, confirmation.context.slot);
-      return sig;
-    } else {
-      logger.info(`${tradeIdx} - Transaction sent, pending confirmation`);
-      return "dryrun";
-    }
-  }
-
-  private async processKucoin(marketIndex: number) {
-    if (this.coolingPeriod[marketIndex].kucoin < new Date().getTime()) {
-      await this.checkKucoinOpenOrders(marketIndex);
-    }
-    if (this.coolingPeriod[marketIndex].kucoin < new Date().getTime()) {
-      await this.hedgeWithKucoin(marketIndex);
-    }
-  }
-
   private async process(market: PerpMarketAccount) {
 
-    this.processKucoin(market.marketIndex).catch(e => logger.error(e));
+    // Process Kucoin orders
+    if (this.coolingPeriod[market.marketIndex].kucoin < new Date().getTime()) {
+      await this.hedgeWithKucoin(market.marketIndex);
+    }
 
+    // Process Drift new auctions
     if (this.coolingPeriod[market.marketIndex].jit < new Date().getTime()) {
       this.checkForAuction(market).catch(e => logger.error(e));
     }
-    this.checkAndUpdateLimitOrders(market.marketIndex).catch(e => logger.error(`Error updating limit orders: ${e}`));
+
+    // Process Drift orders
+    this.processDrift(market.marketIndex).catch(e => logger.error(`Error updating limit orders: ${e}`));
   }
 
   private async tryMake() {
@@ -1473,30 +1475,27 @@ export class JitMakerBot implements Bot {
           );
         });
 
-        if (this.isActive) {
+        // Update all Drift market data
+        for (const marketIndex of this.marketEnabled) {
+          try {
+            this.updateDriftMarketData(marketIndex);
+          } catch (e) {
+            this.agentState.isActive.set(marketIndex, false);
+          }
+        }
+
+        if (this.allInitDone) {
 
           await this.updateAgentState();
 
           await Promise.all(
             // TODO: spot
             this.driftClient.getPerpMarketAccounts().map((marketAccount) => {
-              if (this.marketEnabled.includes(marketAccount.marketIndex)) {
+              if (this.marketEnabled.includes(marketAccount.marketIndex) && this.agentState.isActive.get(marketAccount.marketIndex)) {
                 this.process(marketAccount);
               }
             })
           );
-        } else {
-          let allContractReady = true;
-          for (const marketId of this.marketEnabled) {
-            if (!this.futureKucoinContract[marketId] || !this.bookKucoin[marketId]) {
-              allContractReady = false;
-              break;
-            }
-          }
-          if (this.allInitDone && allContractReady) {
-            this.isActive = true;
-            logger.info(`Bot is now active`);
-          }
         }
 
         ran = true;
@@ -1535,15 +1534,238 @@ export class JitMakerBot implements Bot {
     }
   }
 
+  /*
+   Responsible to send market data to prometheus
+   */
   private marketDataCallback(obs: ObservableResult<Attributes>) {
-    if (this.isActive) {
-      for (const marketIndex of this.marketEnabled) {
-        const name = INDEX_TO_NAME[marketIndex];
-        obs.observe(this.vwapKucoin[marketIndex].asks, { type: 'vwap', side: 'asks', exchange: 'kucoin', market: name });
-        obs.observe(this.vwapKucoin[marketIndex].bids, { type: 'vwap', side: 'bids', exchange: 'kucoin', market: name });
-        obs.observe(this.bookKucoin[marketIndex].bestBid(1), { type: 'best_price', side: 'bids', exchange: 'kucoin', market: name });
-        obs.observe(this.bookKucoin[marketIndex].bestAsk(1), { type: 'best_price', side: 'asks', exchange: 'kucoin', market: name });
+    for (const marketIndex of this.marketEnabled) {
+      const name = INDEX_TO_NAME[marketIndex];
+
+      // Add kucoin data
+      const marketDataKucoin = this.agentState.kucoinMarketData.get(marketIndex);
+      if (marketDataKucoin.bestPrice.bid > 0 && marketDataKucoin.bestPrice.ask > 0) {
+        obs.observe(marketDataKucoin.vwap.ask, { type: 'vwap', side: 'asks', exchange: 'kucoin', market: name });
+        obs.observe(marketDataKucoin.vwap.bid, { type: 'vwap', side: 'bids', exchange: 'kucoin', market: name });
+        obs.observe(marketDataKucoin.bestPrice.bid, { type: 'best_price', side: 'bids', exchange: 'kucoin', market: name });
+        obs.observe(marketDataKucoin.bestPrice.ask, { type: 'best_price', side: 'asks', exchange: 'kucoin', market: name });
+        obs.observe(marketDataKucoin.mid, { type: 'mid', side: 'mid', exchange: 'kucoin', market: name });
       }
+
+      // Add drift data
+      const marketDataDrift = this.agentState.driftMarketData.get(marketIndex);
+      if (marketDataDrift.bestPrice.bid > 0 && marketDataDrift.bestPrice.ask > 0) {
+        obs.observe(marketDataDrift.bestPrice.bid, { type: 'best_price', side: 'bids', exchange: 'drift', market: name });
+        obs.observe(marketDataDrift.bestPrice.ask, { type: 'best_price', side: 'asks', exchange: 'drift', market: name });
+        obs.observe(marketDataDrift.mid, { type: 'mid', side: 'mid', exchange: 'drift', market: name });
+        obs.observe(marketDataDrift.spread, { type: 'mid', side: 'mid', exchange: 'drift', market: name });
+      }
+
+      const volatility = this.agentState.volatility.get(marketIndex);
+      if (volatility) {
+        obs.observe(volatility, { type: 'volatility', side: '', exchange: 'kucoin', market: name });
+      }
+
+      const centerOfMass = this.agentState.centerOfMass.get(marketIndex);
+      if (centerOfMass) {
+        obs.observe(centerOfMass, { type: 'centerOfMass', side: '', exchange: 'kucoin', market: name });
+      }
+
+      obs.observe(this.exchangeDelta[marketIndex], { type: 'exchange_delta', side: '', exchange: '', market: name });
+    }
+  }
+
+  /*
+   Responsible to send model data to prometheus
+   */
+  private modelCallback(obs: ObservableResult<Attributes>) {
+
+    for (const marketIndex of [0, 1, 2, 3, 5]) {
+      const name = INDEX_TO_NAME[marketIndex];
+      const isActive = this.agentState.isActive.get(marketIndex);
+      obs.observe(isActive ? 1 : 0, { type: 'is_active', side: '', exchange: '', market: name });
+    }
+
+    for (const marketIndex of this.marketEnabled) {
+      const name = INDEX_TO_NAME[marketIndex];
+      const targetPrices = this.targetPrices.get(marketIndex);
+
+      // Add kucoin data
+      if (targetPrices.kucoin.buy > 0) {
+        obs.observe(targetPrices.kucoin.buy, { type: 'target', side: 'bids', exchange: 'kucoin', market: name });
+      }
+      if (targetPrices.kucoin.sell > 0) {
+        obs.observe(targetPrices.kucoin.sell, { type: 'target', side: 'asks', exchange: 'kucoin', market: name });
+      }
+
+      // Add drift data
+      if (targetPrices.drift.buy > 0) {
+        obs.observe(targetPrices.drift.buy, { type: 'target', side: 'bids', exchange: 'drift', market: name });
+      }
+      if (targetPrices.drift.sell > 0) {
+        obs.observe(targetPrices.drift.sell, { type: 'target', side: 'asks', exchange: 'drift', market: name });
+      }
+    }
+  }
+
+  /*
+   Responsible to send order data to prometheus
+   */
+  private orderCallback(obs: ObservableResult<Attributes>) {
+
+    for (const marketIndex of this.marketEnabled) {
+      const name = INDEX_TO_NAME[marketIndex];
+      const positions = this.agentState.positions.get(marketIndex);
+      const openOrders = this.agentState.openOrders.get(marketIndex);
+
+      // Add kucoin data
+      obs.observe(positions.kucoin, { type: 'position', side: '', exchange: 'drift', market: name });
+
+      // Observe open order prices and volumes
+      let openOrdersStats = {
+        buyPrice: undefined,
+        buyVolume: undefined,
+        buyTime: undefined,
+        sellPrice: undefined,
+        sellVolume: undefined,
+        sellTime: undefined
+      };
+      for (const x of openOrders.kucoin.values()) {
+        if (x.side === 'sell') {
+          openOrdersStats.sellPrice = +x.price;
+          openOrdersStats.sellVolume = +x.size;
+          openOrdersStats.sellTime = x.timestamp;
+        } else {
+          openOrdersStats.buyPrice = +x.price;
+          openOrdersStats.buyVolume = +x.size;
+          openOrdersStats.buyTime = x.timestamp;
+        }
+      }
+      if (openOrdersStats.sellPrice !== undefined) obs.observe(openOrdersStats.sellPrice, {
+        type: 'open_order_price',
+        side: 'sell',
+        exchange: 'kucoin',
+        market: name
+      });
+
+      if (openOrdersStats.sellVolume !== undefined) obs.observe(openOrdersStats.sellVolume, {
+        type: 'open_order_volume',
+        side: 'sell',
+        exchange: 'kucoin',
+        market: name
+      });
+
+      if (openOrdersStats.sellTime !== undefined) obs.observe(openOrdersStats.sellTime, {
+        type: 'open_order_time',
+        side: 'sell',
+        exchange: 'kucoin',
+        market: name
+      });
+
+      if (openOrdersStats.buyPrice !== undefined) obs.observe(openOrdersStats.buyPrice, {
+        type: 'open_order_price',
+        side: 'buy',
+        exchange: 'kucoin',
+        market: name
+      });
+
+      if (openOrdersStats.buyPrice !== undefined) obs.observe(openOrdersStats.buyVolume, {
+        type: 'open_order_volume',
+        side: 'buy',
+        exchange: 'kucoin',
+        market: name
+      });
+
+      if (openOrdersStats.buyTime !== undefined) obs.observe(openOrdersStats.buyTime, {
+        type: 'open_order_time',
+        side: 'buy',
+        exchange: 'kucoin',
+        market: name
+      });
+
+      // Add drift data
+      obs.observe(positions.drift, { type: 'position', side: '', exchange: 'drift', market: name });
+
+      openOrdersStats = {
+        buyPrice: undefined,
+        buyVolume: undefined,
+        buyTime: undefined,
+        sellPrice: undefined,
+        sellVolume: undefined,
+        sellTime: undefined
+      };
+      for (const x of openOrders.drift.values()) {
+        if (isVariant(x.direction, 'long')) {
+          openOrdersStats.buyPrice = convertToNumber(x.price, PRICE_PRECISION);
+          openOrdersStats.buyVolume = convertToNumber(x.baseAssetAmount, BASE_PRECISION);
+        } else {
+          openOrdersStats.sellPrice = convertToNumber(x.price, PRICE_PRECISION);
+          openOrdersStats.sellVolume = convertToNumber(x.baseAssetAmount, BASE_PRECISION);
+        }
+      }
+      if (openOrdersStats.sellPrice !== undefined) obs.observe(openOrdersStats.sellPrice, {
+        type: 'open_order_price',
+        side: 'sell',
+        exchange: 'drift',
+        market: name
+      });
+
+      if (openOrdersStats.sellVolume !== undefined) obs.observe(openOrdersStats.sellVolume, {
+        type: 'open_order_volume',
+        side: 'sell',
+        exchange: 'drift',
+        market: name
+      });
+
+      if (openOrdersStats.buyPrice !== undefined) obs.observe(openOrdersStats.buyPrice, {
+        type: 'open_order_price',
+        side: 'buy',
+        exchange: 'drift',
+        market: name
+      });
+
+      if (openOrdersStats.buyPrice !== undefined) obs.observe(openOrdersStats.buyVolume, {
+        type: 'open_order_volume',
+        side: 'buy',
+        exchange: 'drift',
+        market: name
+      });
+
+    }
+  }
+
+  /*
+   Verify that all the data is in place and not too old, if not set is active to false
+   */
+  private control() {
+
+    for (const marketIndex of this.marketEnabled) {
+      const driftMarketData = this.agentState.driftMarketData.get(marketIndex);
+      const kucoinMarketData = this.agentState.kucoinMarketData.get(marketIndex);
+      const targetPrices = this.targetPrices.get(marketIndex);
+
+      if (!this.allInitDone) {
+        this.agentState.isActive.set(marketIndex, false);
+        continue;
+      }
+
+      if (!driftMarketData || driftMarketData.bestPrice.bid === 0 || driftMarketData.bestPrice.ask === 0) {
+        this.agentState.isActive.set(marketIndex, false);
+        continue;
+      }
+      if (!kucoinMarketData || kucoinMarketData.bestPrice.bid === 0 || kucoinMarketData.bestPrice.ask === 0) {
+        this.agentState.isActive.set(marketIndex, false);
+        continue;
+      }
+      if (targetPrices.drift.sell <= 0 || targetPrices.drift.buy <= 0 || targetPrices.kucoin.sell <= 0 || targetPrices.kucoin.buy <= 0) {
+        this.agentState.isActive.set(marketIndex, false);
+        continue;
+      }
+      if (kucoinMarketData.book.datetime.getTime() < new Date().getTime() - 10000) {
+        this.agentState.isActive.set(marketIndex, false);
+        continue;
+      }
+
+      this.agentState.isActive.set(marketIndex, true);
     }
   }
 }

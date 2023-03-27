@@ -1,3 +1,5 @@
+import { KlineResponse } from '../kucoin-api/market';
+
 export enum StateType {
   /** Flat there is no open position */
   NEUTRAL = 'neutral',
@@ -105,4 +107,53 @@ export class MaxSizeList {
     return Math.sqrt(variance);
   }
 
+}
+
+interface PriceData {
+    time: number;
+    entryPrice: number;
+    highestPrice: number;
+    lowestPrice: number;
+    closePrice: number;
+    tradingVolume: number;
+}
+
+export function calculateVWCP(apiData: KlineResponse): number {
+
+    let sumClosePriceVolume = 0;
+    let sumVolume = 0;
+
+    for (const item of apiData.data) {
+        sumClosePriceVolume += item[4] * item[5];
+        sumVolume += item[5];
+    }
+
+    if (sumVolume === 0) {
+        throw new Error("Total trading volume is zero.");
+    }
+
+    return sumClosePriceVolume / sumVolume;
+}
+
+export function calculateVolatility(apiData: KlineResponse): number {
+
+    const n = apiData.data.length;
+
+    if (n < 2) {
+        throw new Error("Not enough data to calculate volatility.");
+    }
+
+    let sumClosePrice = 0;
+    let sumClosePriceSquared = 0;
+
+    for (const item of apiData.data) {
+        sumClosePrice += item[4];
+        sumClosePriceSquared += item[4] * item[4];
+    }
+
+    const meanClosePrice = sumClosePrice / n;
+    const meanClosePriceSquared = sumClosePriceSquared / n;
+
+    const variance = meanClosePriceSquared - meanClosePrice * meanClosePrice;
+    return Math.sqrt(variance);
 }

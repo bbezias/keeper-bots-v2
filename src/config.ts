@@ -51,6 +51,15 @@ export type JitMakerConfig = BaseBotConfig & {
 		apt: boolean,
 		matic: boolean
 	}
+	modelCoefficients: {
+		k1: number,  // k1: volatility coefficient
+		k2: number,  // k2: spread coefficient
+		k3: number,  // k3: drift/kucoin coefficient
+		k4: number,  // k4: risk appetite
+		k5: number,  // k5: Maximum price drift
+		k6: number,  // k6: Weight of the model center point By VWAP
+		k7: number,  // k7: We apply premium to target if we are already moving towards that direction
+	}
 };
 
 export type GPTBotConfig = BaseBotConfig & {
@@ -260,6 +269,7 @@ export function loadConfigFromOpts(opts: any): Config {
 			marketEnabled: opts.marketEnabled ?? {sol: true, btc: true, eth: true, apt: true, matic: true},
 			maxPositionExposure: opts.maxPositionExposure ?? 0.1,
 			profitThreshold: opts.profitThreshold ?? {sol: 0.001, btc: 0.001, eth: 0.001, apt: 0.003, matic: 0.001},
+			modelCoefficients: opts.modelCoefficients ?? {k1: 1, k2: 0, k3: 1.05, k4: 0, k5: 0, k6: 0, k7: 0.01}
 		};
 	}
 	if (opts.gptBot) {
