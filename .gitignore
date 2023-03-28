@@ -149,3 +149,4 @@ config-liquidator.yaml
 config-filler-spot.yaml
 /config-testing.yaml
 docker-compose.yml
+/docker-compose-validator.yml
