@@ -1730,17 +1730,17 @@ tx: ${tx} `
           batchObservableResult.observe(
             this.totalLeverage,
             convertToNumber(user.getLeverage(), TEN_THOUSAND),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            attr
           );
           batchObservableResult.observe(
             this.totalCollateral,
             convertToNumber(user.getTotalCollateral(), QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            attr
           );
           batchObservableResult.observe(
             this.freeCollateral,
             convertToNumber(user.getFreeCollateral(), QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            attr
           );
           batchObservableResult.observe(
             this.initialMarginRequirement,
@@ -1748,7 +1748,7 @@ tx: ${tx} `
               user.getInitialMarginRequirement(),
               QUOTE_PRECISION
             ),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            attr
           );
           batchObservableResult.observe(
             this.maintenanceMarginRequirement,
@@ -1756,17 +1756,17 @@ tx: ${tx} `
               user.getMaintenanceMarginRequirement(),
               QUOTE_PRECISION
             ),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            attr
           );
           batchObservableResult.observe(
             this.unrealizedPnL,
             convertToNumber(user.getUnrealizedPNL(), QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            attr
           );
           batchObservableResult.observe(
             this.unrealizedFundingPnL,
             convertToNumber(user.getUnrealizedFundingPNL(), QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            attr
           );
         }
       },
