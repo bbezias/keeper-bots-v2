@@ -333,9 +333,7 @@ export class LiquidatorBot implements Bot {
         });
       }
     }
-    logger.info(`${this.name} perpMarketIndicies: ${this.perpMarketIndicies}`);
-    console.log('this.perpMarketToSubaccount:');
-    console.log(this.perpMarketToSubaccount);
+    logger.info(`${this.name} perpMarketIndices: ${this.perpMarketIndicies}`);
 
     if (config.spotSubAccountConfig) {
       logger.info('Loading spot markets to watch from spotSubAccountConfig');
@@ -360,8 +358,6 @@ export class LiquidatorBot implements Bot {
       }
     }
     logger.info(`${this.name} spotMarketIndicies: ${this.spotMarketIndicies}`);
-    console.log('this.spotMarketToSubaccount:');
-    console.log(this.spotMarketToSubaccount);
   }
 
   public async init() {
@@ -1722,8 +1718,6 @@ tx: ${tx} `
           );
         }
 
-        console.log('watchlist length', this.userWatchList.length);
-
         const newWatchPublicKey = new Map<string, Watchlist>();
         for (const userObject of this.userWatchList) {
           const user = userObject.user;
@@ -1739,7 +1733,7 @@ tx: ${tx} `
           );
           batchObservableResult.observe(
             this.totalCollateral,
-            convertToNumber(user.getTotalCollateral(), QUOTE_PRECISION),
+            convertToNumber(user.getTotalCollateral('Maintenance'), QUOTE_PRECISION),
             attr
           );
           batchObservableResult.observe(
