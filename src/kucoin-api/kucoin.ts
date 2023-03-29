@@ -43,6 +43,11 @@ export class KucoinController extends EventEmitter {
         if (this.api.ws && this.api.ws.ws.readyState === ReconnectingWebSocket.OPEN) {
           logger.warn(`Websocket subscription seems lost for ${symbol}, trying to resubscribe`);
           try {
+            await this.api.ws.unsubscribe({symbol});
+          } catch (e) {
+            logger.error(`error trying to unsubscribe: ${e}`);
+          }
+          try {
             await this.subscribe(symbol);
           } catch (e) {
             logger.error(e);

@@ -1,46 +1,46 @@
 import {
-  BN,
-  isVariant,
-  DriftClient,
-  PerpMarketAccount,
-  SlotSubscriber,
-  PositionDirection,
-  OrderType,
-  OrderRecord,
-  NewUserRecord,
   BASE_PRECISION,
-  QUOTE_PRECISION,
+  BN,
+  calculateBidAskPrice,
   convertToNumber,
-  PRICE_PRECISION,
-  PerpPosition,
-  SpotPosition,
   DLOB,
   DLOBNode,
+  DriftClient,
+  EventMap,
+  getOrderSignature,
+  isVariant,
+  MarketType,
+  NewUserRecord,
+  OptionalOrderParams,
+  Order as DriftOrder,
+  OrderRecord,
+  OrderType,
+  PerpMarketAccount,
+  PerpPosition,
+  PositionDirection,
+  PostOnlyParams,
+  PRICE_PRECISION,
+  QUOTE_PRECISION,
+  SlotSubscriber,
+  SpotPosition,
   UserMap,
   UserStatsMap,
-  Order as DriftOrder,
-  getOrderSignature,
-  MarketType,
-  PostOnlyParams,
-  calculateBidAskPrice,
   Wallet,
-  ZERO,
-  OptionalOrderParams,
   WrappedEvent,
-  EventMap,
+  ZERO,
 } from '@drift-labs/sdk';
-import { Mutex, tryAcquire, withTimeout, E_ALREADY_LOCKED } from 'async-mutex';
+import { E_ALREADY_LOCKED, Mutex, tryAcquire, withTimeout } from 'async-mutex';
 
-import { TransactionSignature, PublicKey, TransactionMessage, VersionedTransaction, ComputeBudgetProgram } from '@solana/web3.js';
+import { ComputeBudgetProgram, PublicKey, TransactionMessage, TransactionSignature, VersionedTransaction } from '@solana/web3.js';
 
 import { getErrorCode } from '../error';
 import { logger } from '../logger';
 import { Bot } from '../types';
 
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
-import { Counter, Histogram, Meter, ObservableGauge, ObservableResult, Attributes } from '@opentelemetry/api';
+import { Attributes, Counter, Histogram, Meter, ObservableGauge, ObservableResult } from '@opentelemetry/api';
 import { MeterProvider } from '@opentelemetry/sdk-metrics';
-import { RuntimeSpec, metricAttrFromUserAccount } from '../metrics';
+import { metricAttrFromUserAccount, RuntimeSpec } from '../metrics';
 import { JitMakerConfig } from '../config';
 import { KucoinController } from '../kucoin-api/kucoin';
 import { Order as KucoinOrder, OrderBook } from '../kucoin-api/models';
@@ -54,6 +54,7 @@ import {
   INDEX_TO_SYMBOL,
   MaxSizeList,
   StateType,
+  stateTypeToCode,
   SYMBOL_TO_INDEX
 } from './utils';
 import { DriftMarketData, KucoinMarketData } from './marketDataUtils';
@@ -68,7 +69,10 @@ type Action = {
 };
 
 type State = {
-  stateType: Map<number, StateType>;
+  driftState: Map<number, StateType>;
+  driftStateCode: Map<number, number>;
+  overallState: Map<number, StateType>;
+  overallStateCode: Map<number, number>;
   spotMarketPosition: Map<number, SpotPosition>;
   perpMarketPosition: Map<number, PerpPosition>;
   kucoinMarketData: Map<number, KucoinMarketData>;
@@ -83,7 +87,8 @@ type State = {
   isActive: Map<number, boolean>;
   volatility: Map<number, number>;
   centerOfMass: Map<number, number>;
-
+  driftPositionValue: Map<number, number>;
+  collateral: Map<number, number>;
 };
 
 const dlobMutexError = new Error('dlobMutex timeout');
@@ -150,6 +155,7 @@ export class JitMakerBot implements Bot {
   private watchdogTimerMutex = new Mutex();
   private watchdogTimerLastPatTime = Date.now();
 
+  private readonly MAX_EXCHANGE_EXPOSURE;
   private readonly MAX_POSITION_EXPOSURE;
   private kucoin: KucoinController;
 
@@ -160,7 +166,6 @@ export class JitMakerBot implements Bot {
   private maxTradeSize: { [id: number]: number } = {};
   private maxTradeSizeInLot: { [id: number]: number } = {};
   private coolingPeriod: { [id: number]: { jit: number, kucoin: number, long: number, short: number } } = {};
-  private priceDistanceBeforeUpdateLimit: { [id: number]: number } = {};
   private kucoinOpenOrderExposureList: { [id: number]: number } = {};
   private marketEnabled: number[] = [];
   private contractEnabled: string[] = [];
@@ -169,7 +174,7 @@ export class JitMakerBot implements Bot {
   private targetPrices: Map<number, { kucoin: { buy: number, sell: number }, drift: { buy: number, sell: number } }>; // Target Price
 
   // k1: volatility coefficient, k2: spread coefficient, k3: drift/kucoin coefficient, k4: risk appetite, k5: Maximum price drift, Weight of the model center point By VWAP
-  private readonly modelCoefficients: { k1: number, k2: number, k3: number, k4: number, k5: number, k6: number, k7: number };
+  private readonly modelCoefficients: { k1: number, k2: number, k3: number, k4: number, k5: number, k6: number, k7: number, k8: number };
 
   constructor(
     clearingHouse: DriftClient,
@@ -185,6 +190,7 @@ export class JitMakerBot implements Bot {
 
     this.kucoinMakerFee = config.kucoinMakerFee;
     this.profitThreshold = config.profitThreshold;
+    this.MAX_EXCHANGE_EXPOSURE = config.maxExchangeExposure;
     this.MAX_POSITION_EXPOSURE = config.maxPositionExposure;
     this.modelCoefficients = config.modelCoefficients;
 
@@ -192,7 +198,10 @@ export class JitMakerBot implements Bot {
     this.targetPrices = new Map<number, { kucoin: { buy: number, sell: number }, drift: { buy: number, sell: number } }>();
 
     this.agentState = {
-      stateType: new Map<number, StateType>(),
+      driftState: new Map<number, StateType>(),
+      driftStateCode: new Map<number, number>(),
+      overallState: new Map<number, StateType>(),
+      overallStateCode: new Map<number, number>(),
       spotMarketPosition: new Map<number, SpotPosition>(),
       perpMarketPosition: new Map<number, PerpPosition>(),
       openOrders: new Map<number, { kucoin: Map<string, KucoinOrder>, drift: Map<string, DriftOrder> }>(),
@@ -206,7 +215,9 @@ export class JitMakerBot implements Bot {
       deltaKucoinDrift: new Map<number, MaxSizeList>(),
       isActive: new Map<number, boolean>(),
       volatility: new Map<number, number>(),
-      centerOfMass: new Map<number, number>()
+      centerOfMass: new Map<number, number>(),
+      driftPositionValue: new Map<number, number>(),
+      collateral: new Map<number, number>()
     };
 
     for (const i of [0, 1, 2, 3, 4, 5]) {
@@ -216,7 +227,6 @@ export class JitMakerBot implements Bot {
       this.marketEnabled.push(i);
       this.contractEnabled.push(INDEX_TO_SYMBOL[i]);
       this.profitThreshold[i] = config.profitThreshold[x];
-      this.priceDistanceBeforeUpdateLimit[i] = config.priceDistanceBeforeUpdateLimit[x];
       this.maxTradeSize[i] = config.maxTradeSize[x];
       this.kucoinOpenOrderExposureList[i] = 0;
       this.coolingPeriod[i] = { jit: 0, kucoin: 0, long: 0, short: 0 };
@@ -226,7 +236,8 @@ export class JitMakerBot implements Bot {
       this.agentState.deltaKucoinDrift.set(i, new MaxSizeList(20));
       this.agentState.exchangeDeltaTime.set(i, 0);
       this.agentState.positions.set(i, { kucoin: 0, drift: 0 });
-      this.agentState.stateType.set(i, StateType.NOT_STARTED);
+      this.agentState.driftState.set(i, StateType.NOT_STARTED);
+      this.agentState.driftStateCode.set(i, 0);
       this.agentState.openOrders.set(i, { kucoin: new Map(), drift: new Map() });
       this.agentState.expectingOrderDataFrom.set(i, undefined);
       this.agentState.kucoinOpenOrderExposureList.set(i, 0);
@@ -572,7 +583,7 @@ export class JitMakerBot implements Bot {
   private async updateTargetPrice() {
     for (const marketIndex of this.marketEnabled) {
       const symbol = INDEX_TO_SYMBOL[marketIndex];
-      const from = new Date().getTime() - 1000 * 60 * 60;
+      const from = new Date().getTime() - 1000 * 60 * this.modelCoefficients.k8;
 
       // Retrieve the past hour of data to calculate VWCP and Vol
       const r = await this.kucoin.api.kline({ granularity: 1, symbol, from });
@@ -759,8 +770,11 @@ export class JitMakerBot implements Bot {
           p.quoteAssetAmount,
           QUOTE_PRECISION
         );
+        const driftPosition = baseValue / multiplier;
 
-        this.agentState.positions.get(p.marketIndex).drift = baseValue / multiplier;
+        this.agentState.driftPositionValue.set(p.marketIndex, Math.abs(positionValue));
+        this.agentState.collateral.set(p.marketIndex, accountCollateral);
+        this.agentState.positions.get(p.marketIndex).drift = driftPosition;
 
         const exposure = Math.abs(positionValue / accountCollateral);
         logger.info(`${name} - Drift Position has changed from ${previousBaseValue.toPrecision(4)} to ${baseValue.toPrecision(4)} - New Exposure ${(exposure * 100).toPrecision(2)}`);
@@ -768,39 +782,55 @@ export class JitMakerBot implements Bot {
         // update current position based on market position
         this.agentState.perpMarketPosition.set(p.marketIndex, p);
 
-        // update state
-        let currentState = this.agentState.stateType.get(p.marketIndex);
-        if (!currentState) {
-          this.agentState.stateType.set(p.marketIndex, StateType.NEUTRAL);
-          currentState = StateType.NOT_STARTED;
+        // update Drift state
+        let driftState = this.agentState.driftState.get(p.marketIndex);
+        if (!driftState) driftState = StateType.NOT_STARTED;
+        if (exposure >= this.MAX_EXCHANGE_EXPOSURE && p.baseAssetAmount.gt(new BN(0))) {
+          driftState = StateType.CLOSING_LONG;
+        } else if (exposure >= this.MAX_EXCHANGE_EXPOSURE && p.baseAssetAmount.lt(new BN(0))) {
+          driftState = StateType.CLOSING_SHORT;
+        } else if (p.baseAssetAmount.gt(new BN(0))) {
+          driftState = StateType.LONG;
+        } else if (p.baseAssetAmount.lt(new BN(0))) {
+          driftState = StateType.SHORT;
+        } else {
+          driftState = StateType.NEUTRAL;
         }
 
-        if (currentState === StateType.CLOSING_LONG && p.baseAssetAmount.gt(new BN(0))) {
-          logger.info(`${name} - Drift state remains "closing_long"`);
-        } else if (currentState === StateType.CLOSING_SHORT && p.baseAssetAmount.lt(new BN(0))) {
-          logger.info(`${name} - Drift state remains "closing_short"`);
-        } else if (exposure >= this.MAX_POSITION_EXPOSURE && p.baseAssetAmount.lt(new BN(0))) {
-          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "closing_short"`);
-          this.agentState.stateType.set(
-            p.marketIndex,
-            StateType.CLOSING_SHORT
-          );
-        } else if (exposure >= this.MAX_POSITION_EXPOSURE && p.baseAssetAmount.gt(new BN(0))) {
-          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "closing_long"`);
-          this.agentState.stateType.set(
-            p.marketIndex,
-            StateType.CLOSING_LONG
-          );
-        } else if (p.baseAssetAmount.gt(new BN(0))) {
-          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "long"`);
-          this.agentState.stateType.set(p.marketIndex, StateType.LONG);
-        } else if (p.baseAssetAmount.lt(new BN(0))) {
-          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "short"`);
-          this.agentState.stateType.set(p.marketIndex, StateType.SHORT);
+        console.log('drift state', name, driftState);
+
+        // Set the values
+        this.agentState.driftState.set(i, driftState);
+        this.agentState.driftStateCode.set(i, stateTypeToCode[driftState]);
+      }
+
+      for (const i of this.marketEnabled) {
+        // Take a new position if the total position is different from 0
+        const multiplier = this.agentState.kucoinContract.get(i).multiplier;
+        const kucoinPosition = this.agentState.positions.get(i).kucoin;
+        const driftPosition = this.agentState.positions.get(i).drift;
+        const overallPosition = (driftPosition + kucoinPosition) * multiplier * this.agentState.kucoinMarketData.get(i).bestPrice.bid;
+        let overallState = this.agentState.overallState.get(i);
+
+        if (!overallState) overallState = StateType.NOT_STARTED;
+        if ((overallState === StateType.CLOSING_LONG && overallPosition > 0) || (overallPosition >= this.MAX_POSITION_EXPOSURE)) {
+          overallState = StateType.CLOSING_LONG;
+        } else if ((overallState === StateType.CLOSING_SHORT && overallPosition < 0) || (overallPosition <= -1 * this.MAX_POSITION_EXPOSURE)) {
+          overallState = StateType.CLOSING_SHORT;
+        } else if (overallPosition > 0)
+        {
+          overallState = StateType.LONG;
+        } else if (overallPosition < 0) {
+          overallState = StateType.SHORT;
         } else {
-          logger.info(`${name} - Drift state changed from "${currentState.toLowerCase()}" to "neutral"`);
-          this.agentState.stateType.set(p.marketIndex, StateType.NEUTRAL);
+          overallState = StateType.NEUTRAL;
         }
+
+        console.log('global state', i, overallState);
+
+        // Set the values
+        this.agentState.overallState.set(i, overallState);
+        this.agentState.overallStateCode.set(i, stateTypeToCode[overallState]);
       }
 
       const existingOrders = new Set<number>();
@@ -820,7 +850,7 @@ export class JitMakerBot implements Bot {
           return;
         }
 
-        if (!isVariant(o.orderType, 'limit')) return;
+        if (!isVariant(o.orderType, 'limit') || o.baseAssetAmountFilled.gte(o.baseAssetAmount)) return;
 
         const marketIndex = o.marketIndex;
         const name = INDEX_TO_NAME[marketIndex];
@@ -1086,10 +1116,18 @@ export class JitMakerBot implements Bot {
   /**
    * Maintain the open order to 1 per side and close to the target price
    */
-  private async processDriftBySide(openOrders: DriftOrder[], marketIndex: number, direction: 'long' | 'short', currentState: StateType) {
+  private async processDriftBySide(
+    openOrders: DriftOrder[],
+    marketIndex: number,
+    direction: 'long' | 'short',
+    currentDriftState: StateType,
+    currentOverallState: StateType
+  ) {
 
     const name = INDEX_TO_NAME[marketIndex];
     const isLong = direction === 'long';
+    const closingShort = currentOverallState === StateType.CLOSING_SHORT || currentDriftState === StateType.CLOSING_SHORT;
+    const closingLong = currentOverallState === StateType.CLOSING_LONG || currentDriftState === StateType.CLOSING_LONG;
 
     const mutex = isLong ? this.mutexes[marketIndex].long : this.mutexes[marketIndex].short;
     const coolingPeriod = isLong ? this.coolingPeriod[marketIndex].long : this.coolingPeriod[marketIndex].short;
@@ -1105,12 +1143,12 @@ export class JitMakerBot implements Bot {
         // Only 1 open order allowed
         logger.info(`${name} - ${isLong ? "long" : "short"} - Closing order because there are too many`);
         await this.cancelDriftOrder(orders[0].orderId, marketIndex, isLong);
-      } else if (orders.length === 1 && !isLong && currentState === StateType.CLOSING_SHORT) {
+      } else if (orders.length === 1 && !isLong && closingShort) {
 
         // Short open position not allowed if state is closing short
         logger.info(`${name} - ${isLong ? "long" : "short"} - Closing short order because we are in closing short mode`);
         await this.cancelDriftOrder(orders[0].orderId, marketIndex, isLong);
-      } else if (orders.length === 1 && isLong && currentState === StateType.CLOSING_LONG) {
+      } else if (orders.length === 1 && isLong && closingLong) {
 
         // Long open position not allowed if state is closing long
         logger.info(`${name} - ${isLong ? "long" : "short"} -  Closing long order because we are in closing long mode`);
@@ -1126,7 +1164,7 @@ export class JitMakerBot implements Bot {
         }
       } else {
 
-        if ((currentState === StateType.CLOSING_LONG && isLong) || (currentState === StateType.CLOSING_SHORT && !isLong)) {
+        if ((closingLong && isLong) || (closingShort && !isLong)) {
           return;
         }
 
@@ -1167,12 +1205,13 @@ export class JitMakerBot implements Bot {
   private async processDrift(marketIndex: number) {
 
     const openOrderMap = this.agentState.openOrders.get(marketIndex).drift ?? new Map<string, DriftOrder>();
-    const currentState = this.agentState.stateType.get(marketIndex);
+    const currentDriftState = this.agentState.driftState.get(marketIndex);
+    const currentOverallState = this.agentState.overallState.get(marketIndex);
     const openOrders = [...openOrderMap.values()];
 
     await Promise.all([
-      this.processDriftBySide(openOrders, marketIndex, 'long', currentState),
-      this.processDriftBySide(openOrders, marketIndex, 'short', currentState)
+      this.processDriftBySide(openOrders, marketIndex, 'long', currentDriftState, currentOverallState),
+      this.processDriftBySide(openOrders, marketIndex, 'short', currentDriftState, currentOverallState)
     ]);
   }
 
@@ -1251,7 +1290,7 @@ export class JitMakerBot implements Bot {
 
         const isLong = isVariant(orderDirection, 'short');
 
-        const currentState = this.agentState.stateType.get(marketIndex);
+        const currentState = this.agentState.driftState.get(marketIndex);
         if (currentState === StateType.CLOSING_LONG && isLong) {
           continue;
         }
@@ -1616,9 +1655,18 @@ export class JitMakerBot implements Bot {
       const name = INDEX_TO_NAME[marketIndex];
       const positions = this.agentState.positions.get(marketIndex);
       const openOrders = this.agentState.openOrders.get(marketIndex);
+      const driftState = this.agentState.driftStateCode.get(marketIndex);
+      const overallState = this.agentState.overallStateCode.get(marketIndex);
+      const collateral = this.agentState.collateral.get(marketIndex);
+      const positionValue = this.agentState.driftPositionValue.get(marketIndex);
 
-      // Add kucoin data
-      obs.observe(positions.kucoin, { type: 'position', side: '', exchange: 'drift', market: name });
+      // Add status code and everything related to exposure
+      obs.observe(positions.drift, { type: 'position', side: '', exchange: 'drift', market: name });
+      obs.observe(positions.kucoin, { type: 'position', side: '', exchange: 'kucoin', market: name });
+      obs.observe(collateral, { type: 'collateral', side: '', exchange: 'drift', market: name });
+      obs.observe(positionValue, { type: 'positionValue', side: '', exchange: 'drift', market: name });
+      obs.observe(driftState, { type: 'state_type', side: '', exchange: 'drift', market: name });
+      obs.observe(overallState, { type: 'state_type', side: '', exchange: 'overall', market: name });
 
       // Observe open order prices and volumes
       let openOrdersStats = {
@@ -1682,9 +1730,6 @@ export class JitMakerBot implements Bot {
         market: name
       });
 
-      // Add drift data
-      obs.observe(positions.drift, { type: 'position', side: '', exchange: 'drift', market: name });
-
       openOrdersStats = {
         buyPrice: undefined,
         buyVolume: undefined,
@@ -1723,12 +1768,13 @@ export class JitMakerBot implements Bot {
         market: name
       });
 
-      if (openOrdersStats.buyPrice !== undefined) obs.observe(openOrdersStats.buyVolume, {
+      if (openOrdersStats.buyVolume !== undefined) obs.observe(openOrdersStats.buyVolume, {
         type: 'open_order_volume',
         side: 'buy',
         exchange: 'drift',
         market: name
       });
+
 
     }
   }

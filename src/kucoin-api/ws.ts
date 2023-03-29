@@ -3,6 +3,7 @@ import WS from 'ws';
 import { Sign, sign } from './utils';
 import axios, { AxiosResponse } from 'axios';
 import chalk from 'chalk';
+import { logger } from '../logger';
 
 export interface WsParams {
   baseUrl: string;
@@ -31,14 +32,14 @@ export enum WsSocketEndpoints {
 }
 
 export interface SubscriptionParams {
-  endpoint: WsSocketEndpoints;
+  topic: WsSocketEndpoints;
   symbol: string | undefined;
   callback: (msg: any, topic: string) => void;
 }
 
 export interface UnsubscriptionParams {
-  endpoint: WsSocketEndpoints;
-  symbol: string | undefined;
+  endpoint?: string;
+  symbol?: string;
 }
 
 export interface Level2Response {
@@ -183,7 +184,7 @@ class KucoinFutureWebSocket {
   secretKey: string | undefined;
   heartbeat: NodeJS.Timer | undefined;
   ws: ReconnectingWebSocket | undefined;
-  subscriptions: { [topic: string]: (msg: any, topic: string) => void } = {};
+  subscriptions: Map<string, { callback: (msg: any, topic: string) => void, symbol: string, topic: WsSocketEndpoints, endpoint: string }> = new Map();
   openingTime?: Date;
 
   constructor(params: WsParams) {
@@ -211,7 +212,7 @@ class KucoinFutureWebSocket {
   async getPublicWsToken(): Promise<AxiosResponse | undefined> {
     const url = this.baseUrl + '/api/v1/bullet-public';
     return await axios.post(url, {}).catch(e => {
-      console.log(chalk.red('ERROR getPublicWsToken', url, e));
+      logger.info(chalk.red('ERROR getPublicWsToken', url, e));
       return undefined;
     });
   }
@@ -219,7 +220,7 @@ class KucoinFutureWebSocket {
   async getPrivateWsToken(): Promise<AxiosResponse | undefined> {
     const url = this.baseUrl + '/api/v1/bullet-private';
     return await axios.post(url, {}, this.signature).catch(e => {
-      console.log(chalk.red('ERROR getPublicWsToken', url, e));
+      logger.info(chalk.red('ERROR getPublicWsToken', url, e));
       return undefined;
     });
   }
@@ -249,14 +250,14 @@ class KucoinFutureWebSocket {
     }
   }
 
-  _subscribe(sub: SubscriptionParams) {
+  _subscribe(sub: SubscriptionParams): void {
 
     if (!this.ws) throw Error('Websocket not initialised');
 
-    const details = topics(sub.endpoint, sub.symbol);
+    const details = topics(sub.topic, sub.symbol);
 
     if (details.endpoint in this.subscriptions) {
-      throw Error('Subscription already exists');
+      this._unsubscribe({endpoint: details.endpoint});
     }
 
     if (details.type === 'private') {
@@ -267,7 +268,7 @@ class KucoinFutureWebSocket {
         privateChannel: true,
         response: true
       }));
-      console.log("Kucoin - Subscribed to ", details.endpoint);
+      logger.info(`Kucoin - Subscribed to ${details.endpoint}`);
     } else {
       this.ws.send(JSON.stringify({
         id: Date.now(),
@@ -276,43 +277,44 @@ class KucoinFutureWebSocket {
         privateChannel: false,
         response: true
       }));
-      console.log("Kucoin - Subscribed to ", details.endpoint);
+      logger.info(`Kucoin - Subscribed to ${details.endpoint}`);
     }
 
-    this.subscriptions[details.endpoint] = sub.callback;
+    this.subscriptions.set(details.endpoint, { endpoint: details.endpoint, callback: sub.callback, symbol: sub.symbol, topic: sub.topic });
   }
 
-  _unsubscribe(sub: UnsubscriptionParams): void {
+  _unsubscribe(params: UnsubscriptionParams): void {
 
-    if (!this.ws) throw Error('Websocket not initialised');
+    const subs = [...this.subscriptions.values()];
 
-    const details = topics(sub.endpoint, sub.symbol);
+    for (const sub of subs) {
+      if ((params.symbol && sub.symbol === params.symbol) || (params.endpoint && sub.endpoint === params.endpoint)) {
+        const details = topics(sub.topic, sub.symbol);
+        if (this.ws && this.ws.readyState === ReconnectingWebSocket.OPEN) {
+          if (details.type === 'private') {
+            this.ws.send(JSON.stringify({
+              id: Date.now(),
+              type: 'unsubscribe',
+              topic: details.endpoint,
+              privateChannel: true,
+              response: true
+            }));
+            logger.info(`Kucoin - Unsubscribed from ${details.endpoint}`);
+          } else {
+            this.ws.send(JSON.stringify({
+              id: Date.now(),
+              type: 'unsubscribe',
+              topic: details.endpoint,
+              privateChannel: false,
+              response: true
+            }));
+            logger.info(`Kucoin - Unsubscribed from ${details.endpoint}`);
+          }
+        }
 
-    if (!(details.endpoint in this.subscriptions)) {
-      throw Error('Not subscribed');
+        delete this.subscriptions[details.endpoint];
+      }
     }
-
-    if (details.type === 'private') {
-      this.ws.send(JSON.stringify({
-        id: Date.now(),
-        type: 'unsubscribe',
-        topic: details.endpoint,
-        privateChannel: true,
-        response: true
-      }));
-      console.log("Unsubscribed from ", details.endpoint);
-    } else {
-      this.ws.send(JSON.stringify({
-        id: Date.now(),
-        type: 'unsubscribe',
-        topic: details.endpoint,
-        privateChannel: false,
-        response: true
-      }));
-      console.log("Unsubscribed from ", details.endpoint);
-    }
-
-    delete this.subscriptions[details.endpoint];
     return;
   }
 
@@ -320,7 +322,7 @@ class KucoinFutureWebSocket {
     const websocketPath: string = await this.getSocketEndpoint();
     this.ws = new ReconnectingWebSocket(websocketPath, [], { WebSocket: WS });
     this.ws.addEventListener('open', () => {
-      console.log('Kucoin futures websocket opened');
+      logger.info('Kucoin futures websocket opened');
       this.openingTime = new Date();
       this.heartbeat = setInterval(() => {
         this.ws?.send(JSON.stringify({ id: Date.now(), type: 'ping' }));
@@ -331,14 +333,15 @@ class KucoinFutureWebSocket {
     });
     this.ws.addEventListener('message', (msg) => {
       const data = JSON.parse(msg.data);
-      if (data.topic && data.topic in this.subscriptions) {
-        this.subscriptions[data.topic](data.data, data.topic);
+      const sub = this.subscriptions.get(data.topic);
+      if (sub) {
+        sub.callback(data.data, data.topic);
       }
     });
     this.ws.addEventListener('close', () => {
       this.ws = undefined;
       clearInterval(this.heartbeat);
-      console.log(`Kucoin Websocket closed, time opened: ${(new Date().getTime() - (this.openingTime ? this.openingTime.getTime() : new Date().getTime())) / 1000}`);
+      logger.info(`Kucoin Websocket closed, time opened: ${(new Date().getTime() - (this.openingTime ? this.openingTime.getTime() : new Date().getTime())) / 1000}`);
     });
   }
 
@@ -352,19 +355,17 @@ class KucoinFutureWebSocket {
     }
   }
 
-  async unsubscribe(subs: UnsubscriptionParams[]): Promise<void> {
+  async unsubscribe(params: UnsubscriptionParams): Promise<void> {
     if (!this.ws) {
       throw Error('Impossible to unsubscribe, Websocket not opened');
     }
 
-    for (const x of subs) {
-      this._unsubscribe(x);
-    }
+    this._unsubscribe(params);
   }
 
   async terminate(): Promise<void> {
 
-    console.log('Terminate');
+    logger.info('Terminate');
     if (!this.ws) {
       return;
     }
@@ -373,31 +374,31 @@ class KucoinFutureWebSocket {
 
   async level2Depth5(symbol: string, callback: (msg: Level2Response, topic: string) => void): Promise<void> {
     await this.subscribe([{
-      endpoint: WsSocketEndpoints.Depth5, symbol, callback
+      topic: WsSocketEndpoints.Depth5, symbol, callback
     }]);
   }
 
   async level2Depth50(symbol: string, callback: (msg: Level2Response, topic: string) => void): Promise<void> {
     await this.subscribe([{
-      endpoint: WsSocketEndpoints.Depth50, symbol, callback
+      topic: WsSocketEndpoints.Depth50, symbol, callback
     }]);
   }
 
   async ordersMarket(symbol: string, callback: (msg: OrderChangeResponse, topic: string) => void): Promise<void> {
     await this.subscribe([{
-      endpoint: WsSocketEndpoints.OrdersMarket, symbol, callback
+      topic: WsSocketEndpoints.OrdersMarket, symbol, callback
     }]);
   }
 
   async position(symbol: string, callback: (msg: PositionChangePriceResponse | PositionChangeOperationResponse, topic: string) => void): Promise<void> {
     await this.subscribe([{
-      endpoint: WsSocketEndpoints.Position, symbol, callback
+      topic: WsSocketEndpoints.Position, symbol, callback
     }]);
   }
 
   async execution(symbol: string, callback: (msg: ExecutionResponse, topic: string) => void): Promise<void> {
     await this.subscribe([{
-      endpoint: WsSocketEndpoints.Execution, symbol, callback
+      topic: WsSocketEndpoints.Execution, symbol, callback
     }]);
   }
 

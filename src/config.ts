@@ -29,15 +29,9 @@ export type JitMakerConfig = BaseBotConfig & {
 		matic: number
 	};
 	kucoinMakerFee: number;
-	maxPositionExposure: number;
+	maxPositionExposure: number;  //  Max overall exposure Kucoin + drift
+	maxExchangeExposure: number;  // Max Exchange delta risk eg. Kucoin price / Drift price
 	maxTradeSize: {
-		sol: number,
-		btc: number
-		eth: number,
-		apt: number,
-		matic: number
-	},
-	priceDistanceBeforeUpdateLimit: {
 		sol: number,
 		btc: number
 		eth: number,
@@ -56,9 +50,10 @@ export type JitMakerConfig = BaseBotConfig & {
 		k2: number,  // k2: spread coefficient
 		k3: number,  // k3: drift/kucoin coefficient
 		k4: number,  // k4: risk appetite
-		k5: number,  // k5: Maximum price drift
+		k5: number,  // k5: Maximum price drift before cancelling the order
 		k6: number,  // k6: Weight of the model center point By VWAP
 		k7: number,  // k7: We apply premium to target if we are already moving towards that direction
+		k8: number, // Number of minutes used to calculate vwap and volatility
 	}
 };
 
@@ -265,11 +260,11 @@ export function loadConfigFromOpts(opts: any): Config {
 			metricsPort: 9468,
 			kucoinMakerFee: opts.kucoinMakerFee ?? 0.0002,
 			maxTradeSize: opts.maxTradeSize ?? {sol: 0.1, btc: 0.001, eth: 0.01, apt: 0.1, matic: 10},
-			priceDistanceBeforeUpdateLimit: opts.priceDistanceBeforeUpdateLimit ?? {sol: 0.08, btc: 8, eth: 0.3, apt: 0.2, matic: 0.08},
 			marketEnabled: opts.marketEnabled ?? {sol: true, btc: true, eth: true, apt: true, matic: true},
 			maxPositionExposure: opts.maxPositionExposure ?? 0.1,
+			maxExchangeExposure: opts.maxExchangeExposure ?? 0.1,
 			profitThreshold: opts.profitThreshold ?? {sol: 0.001, btc: 0.001, eth: 0.001, apt: 0.003, matic: 0.001},
-			modelCoefficients: opts.modelCoefficients ?? {k1: 1, k2: 0, k3: 1.05, k4: 0, k5: 0, k6: 0, k7: 0.01}
+			modelCoefficients: opts.modelCoefficients ?? {k1: 1, k2: 0, k3: 1.05, k4: 0, k5: 0, k6: 0, k7: 0.01, k8: 30}
 		};
 	}
 	if (opts.gptBot) {

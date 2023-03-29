@@ -18,6 +18,15 @@ export enum StateType {
   CLOSING_SHORT = 'closing-short',
 }
 
+export const stateTypeToCode = {
+  'neutral' : 0,
+  'not_started': 0,
+  'long': 1,
+  'short': -1,
+  'closing-long': 2,
+  'closing-short': -2
+};
+
 export enum KUCOIN_CONTRACTS {
   sol = 'SOLUSDTM',
   btc = 'XBTUSDTM',
@@ -107,15 +116,6 @@ export class MaxSizeList {
     return Math.sqrt(variance);
   }
 
-}
-
-interface PriceData {
-    time: number;
-    entryPrice: number;
-    highestPrice: number;
-    lowestPrice: number;
-    closePrice: number;
-    tradingVolume: number;
 }
 
 export function calculateVWCP(apiData: KlineResponse): number {
