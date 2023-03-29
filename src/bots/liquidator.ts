@@ -1176,9 +1176,12 @@ export class LiquidatorBot implements Bot {
       const maintenanceRequirement =
         user.getMaintenanceMarginRequirement(liquidationBuffer);
 
+      const totalCollateralNumber = convertToNumber(totalCollateral, QUOTE_PRECISION);
+
       const ratio = totalCollateral.eq(new BN(0)) ? 0 : convertToNumber(maintenanceRequirement, QUOTE_PRECISION) / convertToNumber(totalCollateral, QUOTE_PRECISION);
 
-      if (ratio > 0.95) {
+      // Remove the users where total collateral smaller than 1
+      if (ratio > 0.95 && totalCollateralNumber > 1) {
         newWatchListAmount += convertToNumber(totalCollateral, QUOTE_PRECISION);
         newWatchlistCount += 1;
         newWatchList.push({ user, collateral: totalCollateral, maintenanceRequirement, ratio, isLiquidable: ratio > 1 });
@@ -1721,6 +1724,8 @@ tx: ${tx} `
         for (const userObject of this.userWatchList) {
           const user = userObject.user;
           const userAccount = user.getUserAccount();
+          const attr = metricAttrFromUserAccount(user.userAccountPublicKey, userAccount);
+          attr['user_type'] = 'watchlist';
 
           batchObservableResult.observe(
             this.totalLeverage,
