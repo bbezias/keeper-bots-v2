@@ -266,6 +266,7 @@ export class LiquidatorBot implements Bot {
   private lastSlotReyncUserMapsMutex = new Mutex();
 
   private userWatchList: Watchlist[] = [];
+  private watchPublicKeys = new Map<string, Watchlist>();
   private tryIndex = 0;
   private lastSlotResyncUserMaps = 0;
 
@@ -1643,8 +1644,8 @@ tx: ${tx} `
       }
     );
     this.watchlistGauge.addCallback(async (obs) => {
-      obs.observe(this.watchlistCount, {type: 'count'});
-      obs.observe(this.watchlistAmount, {type: 'collateral'});
+      obs.observe(this.watchlistCount, { type: 'count' });
+      obs.observe(this.watchlistAmount, { type: 'collateral' });
     });
 
     this.meter.addBatchObservableCallback(
@@ -1721,11 +1722,15 @@ tx: ${tx} `
           );
         }
 
+        console.log('watchlist length', this.userWatchList.length);
+
+        const newWatchPublicKey = new Map<string, Watchlist>();
         for (const userObject of this.userWatchList) {
           const user = userObject.user;
           const userAccount = user.getUserAccount();
           const attr = metricAttrFromUserAccount(user.userAccountPublicKey, userAccount);
           attr['user_type'] = 'watchlist';
+          newWatchPublicKey.set(user.userAccountPublicKey.toBase58(), userObject);
 
           batchObservableResult.observe(
             this.totalLeverage,
@@ -1769,6 +1774,53 @@ tx: ${tx} `
             attr
           );
         }
+
+        for (const [k, userObject] of this.watchPublicKeys.entries()) {
+          if (!newWatchPublicKey.has(k)) {
+            const user = userObject.user;
+            const userAccount = user.getUserAccount();
+            const attr = metricAttrFromUserAccount(user.userAccountPublicKey, userAccount);
+            attr['user_type'] = 'watchlist';
+
+            batchObservableResult.observe(
+              this.totalLeverage,
+              undefined,
+              attr
+            );
+            batchObservableResult.observe(
+              this.totalCollateral,
+              undefined,
+              attr
+            );
+            batchObservableResult.observe(
+              this.freeCollateral,
+              undefined,
+              attr
+            );
+            batchObservableResult.observe(
+              this.initialMarginRequirement,
+              undefined,
+              attr
+            );
+            batchObservableResult.observe(
+              this.maintenanceMarginRequirement,
+              undefined,
+              attr
+            );
+            batchObservableResult.observe(
+              this.unrealizedPnL,
+              undefined,
+              attr
+            );
+            batchObservableResult.observe(
+              this.unrealizedFundingPnL,
+              undefined,
+              attr
+            );
+          }
+        }
+
+        this.watchPublicKeys = newWatchPublicKey;
       },
       [
         this.totalLeverage,
