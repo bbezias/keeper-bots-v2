@@ -144,3 +144,10 @@ lib
 
 config.yaml
 .env.old
+config-filler-spot.yaml
+config-jit-maker.yaml
+config-liquidator.yaml
+config-mm.yaml
+config-testing.yaml
+docker-compose-liquidator-local.yml
+docker-compose-liquidator.yml
