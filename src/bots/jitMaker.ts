@@ -174,7 +174,7 @@ export class JitMakerBot implements Bot {
   private targetPrices: Map<number, { kucoin: { buy: number, sell: number }, drift: { buy: number, sell: number } }>; // Target Price
 
   // k1: volatility coefficient, k2: spread coefficient, k3: drift/kucoin coefficient, k4: risk appetite, k5: Maximum price drift, Weight of the model center point By VWAP
-  private readonly modelCoefficients: { k1: number, k2: number, k3: number, k4: number, k5: number, k6: number, k7: number, k8: number };
+  private readonly modelCoefficients: { k1: number, k2: number, k3: number, k4: number, k5: number, k6: number, k7: number, k8: number, k9: number };
 
   constructor(
     clearingHouse: DriftClient,
@@ -588,7 +588,7 @@ export class JitMakerBot implements Bot {
       // Retrieve the past hour of data to calculate VWCP and Vol
       const r = await this.kucoin.api.kline({ granularity: 1, symbol, from });
       const vwcp = calculateVWCP(r);
-      const volatility = calculateVolatility(r);
+      const volatility = calculateVolatility(r, this.modelCoefficients.k9);
       this.agentState.volatility.set(marketIndex, volatility);
 
       // Center of mass if how far we want our price target to be from the vwcp relatives to the current price
@@ -599,26 +599,26 @@ export class JitMakerBot implements Bot {
       const centerOfMassDrift = centerOfMass / this.exchangeDelta[marketIndex];
 
       // Retrieving the exposure. We apply premium if we are currently exposed to one direction
-      // Only apply to drift
+      // Only apply to Kucoin
       const driftPosition = Math.round(this.agentState.positions.get(marketIndex).drift);
       const kucoinPosition = this.agentState.positions.get(marketIndex).kucoin;
       const n = Math.trunc(driftPosition + kucoinPosition);
-      const premiumBuyDrift = this.modelCoefficients.k3 * (1 + Math.max(n, 0) * this.modelCoefficients.k7);
-      const premiumSellDrift = this.modelCoefficients.k3 * (1 - Math.min(n, 0) * this.modelCoefficients.k7);
+      // const premiumBuyKucoin = (1 + Math.max(n, 0) * this.modelCoefficients.k7);
+      // const premiumSellKucoin = (1 - Math.min(n, 0) * this.modelCoefficients.k7);
 
       // Take a new position if the total position is different from 0
 
       const targets = { kucoin: { buy: 0, sell: 0 }, drift: { buy: 0, sell: 0 } };
-      targets.kucoin.buy = centerOfMass - volatility * this.modelCoefficients.k1;
-      targets.kucoin.sell = centerOfMass + volatility * this.modelCoefficients.k1;
-      targets.drift.buy = centerOfMassDrift - volatility / this.modelCoefficients.k1 * premiumBuyDrift;
-      targets.drift.sell = centerOfMassDrift + volatility / this.modelCoefficients.k1 * premiumSellDrift;
+      targets.kucoin.buy = centerOfMass - volatility * this.modelCoefficients.k3 * this.modelCoefficients.k1;
+      targets.kucoin.sell = centerOfMass + volatility * this.modelCoefficients.k3 * this.modelCoefficients.k1;
+      targets.drift.buy = centerOfMassDrift - volatility * this.modelCoefficients.k1;
+      targets.drift.sell = centerOfMassDrift + volatility * this.modelCoefficients.k1;
       this.targetPrices.set(marketIndex, targets);
       logger.info(`Target price updated`);
       logger.info(`Kucoin: ${targets.kucoin.buy} / ${targets.kucoin.sell}`);
       logger.info(`Drift: ${targets.drift.buy} / ${targets.drift.sell}`);
       logger.debug(`Center of mass: ${centerOfMass} / volatility: ${volatility} / n ${n}`);
-      logger.debug(`Center of mass Drift: ${centerOfMassDrift} / premium Drift: ${premiumBuyDrift.toPrecision(5)} ${premiumSellDrift.toPrecision(5)}/ n ${n}`);
+      logger.debug(`Center of mass Drift: ${centerOfMassDrift} / n ${n}`);
     }
   }
 
@@ -825,8 +825,6 @@ export class JitMakerBot implements Bot {
         } else {
           overallState = StateType.NEUTRAL;
         }
-
-        console.log('global state', i, overallState);
 
         // Set the values
         this.agentState.overallState.set(i, overallState);

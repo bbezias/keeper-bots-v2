@@ -135,9 +135,9 @@ export function calculateVWCP(apiData: KlineResponse): number {
     return sumClosePriceVolume / sumVolume;
 }
 
-export function calculateVolatility(apiData: KlineResponse): number {
+export function calculateVolatility(apiData: KlineResponse, length: number): number {
 
-    const n = apiData.data.length;
+    const n = Math.min(apiData.data.length, length);
 
     if (n < 2) {
         throw new Error("Not enough data to calculate volatility.");
@@ -146,7 +146,7 @@ export function calculateVolatility(apiData: KlineResponse): number {
     let sumClosePrice = 0;
     let sumClosePriceSquared = 0;
 
-    for (const item of apiData.data) {
+    for (const item of apiData.data.slice(-length)) {
         sumClosePrice += item[4];
         sumClosePriceSquared += item[4] * item[4];
     }

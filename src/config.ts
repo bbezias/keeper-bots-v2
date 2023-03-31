@@ -53,7 +53,8 @@ export type JitMakerConfig = BaseBotConfig & {
 		k5: number,  // k5: Maximum price drift before cancelling the order
 		k6: number,  // k6: Weight of the model center point By VWAP
 		k7: number,  // k7: We apply premium to target if we are already moving towards that direction
-		k8: number, // Number of minutes used to calculate vwap and volatility
+		k8: number, // Number of minutes used to calculate Mean price
+		k9: number, // Number of minutes used to calculate Volatility
 	}
 };
 
@@ -264,7 +265,7 @@ export function loadConfigFromOpts(opts: any): Config {
 			maxPositionExposure: opts.maxPositionExposure ?? 0.1,
 			maxExchangeExposure: opts.maxExchangeExposure ?? 0.1,
 			profitThreshold: opts.profitThreshold ?? {sol: 0.001, btc: 0.001, eth: 0.001, apt: 0.003, matic: 0.001},
-			modelCoefficients: opts.modelCoefficients ?? {k1: 1, k2: 0, k3: 1.05, k4: 0, k5: 0, k6: 0, k7: 0.01, k8: 30}
+			modelCoefficients: opts.modelCoefficients ?? {k1: 1, k2: 0, k3: 1.05, k4: 0, k5: 0, k6: 0, k7: 0.01, k8: 200, k9: 20}
 		};
 	}
 	if (opts.gptBot) {
