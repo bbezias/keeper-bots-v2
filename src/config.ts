@@ -28,12 +28,23 @@ export type LiquidatorConfig = BaseBotConfig & {
 	spotSubAccountConfig?: SubaccountConfig;
 };
 
+export type FloatingMakerConfig = BaseBotConfig & {
+	marketEnabled: {
+		sol: boolean,
+		btc: boolean
+		eth: boolean,
+		apt: boolean,
+		matic: boolean
+	}
+};
+
+
 export type BotConfigMap = {
 	filler?: FillerConfig;
 	spotFiller?: FillerConfig;
 	trigger?: BaseBotConfig;
 	liquidator?: LiquidatorConfig;
-	floatingMaker?: BaseBotConfig;
+	floatingMaker?: FloatingMakerConfig;
 	jitMaker?: BaseBotConfig;
 	ifRevenueSettler?: BaseBotConfig;
 	userPnlSettler?: BaseBotConfig;
@@ -219,6 +230,15 @@ export function loadConfigFromOpts(opts: any): Config {
 			botId: process.env.BOT_ID ?? 'jitMaker',
 			metricsPort: 9464,
 			runOnce: opts.runOnce ?? false,
+		};
+	}
+	if (opts.floatingMaker) {
+		config.enabledBots.push('floatingMaker');
+		config.botConfigs.floatingMaker = {
+			dryRun: opts.dryRun ?? false,
+			botId: process.env.BOT_ID ?? 'floatingMaker',
+			metricsPort: 9469,
+			marketEnabled: opts.marketEnabled ?? {sol: true, btc: true, eth: true, apt: true, matic: true},
 		};
 	}
 	if (opts.ifRevenueSettler) {

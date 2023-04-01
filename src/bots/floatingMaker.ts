@@ -22,14 +22,16 @@ import { Bot } from '../types';
 import { RuntimeSpec, metricAttrFromUserAccount } from '../metrics';
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import { Counter, Histogram, Meter, ObservableGauge } from '@opentelemetry/api';
+import fs from 'fs';
 import {
   ExplicitBucketHistogramAggregation,
   InstrumentType,
   MeterProvider,
   View,
 } from '@opentelemetry/sdk-metrics-base';
-import { BaseBotConfig } from '../config';
+import { FloatingMakerConfig } from '../config';
 import { BatchObservableResult } from '@opentelemetry/api-metrics';
+import { INDEX_TO_LETTERS, INDEX_TO_NAME } from './utils';
 
 // State enum
 enum StateType {
@@ -55,6 +57,8 @@ type State = {
   stateType: Map<number, StateType>;
 };
 
+type LevelParams = { [marketIndex: number]: { bid: number, ask: number, minSpread: number } }
+
 const dlobMutexError = new Error('dlobMutex timeout');
 
 const MARKET_UPDATE_COOLDOWN_SLOTS = 30; // wait slots before updating market position
@@ -68,6 +72,7 @@ enum METRIC_TYPES {
   errors = 'errors',
   unrealized_pnl = 'unrealized_pnl',
   unrealized_funding_pnl = 'unrealized_funding_pnl',
+  levels = 'levels',
   initial_margin_requirement = 'initial_margin_requirement',
   maintenance_margin_requirement = 'maintenance_margin_requirement',
   total_collateral = 'total_collateral',
@@ -88,7 +93,7 @@ enum METRIC_TYPES {
 export class FloatingPerpMakerBot implements Bot {
   public readonly name: string;
   public readonly dryRun: boolean;
-  public readonly defaultIntervalMs: number = 10000;
+  public readonly defaultIntervalMs: number = 5000;
 
   private driftClient: DriftClient;
   private slotSubscriber: SlotSubscriber;
@@ -121,13 +126,18 @@ export class FloatingPerpMakerBot implements Bot {
   private perpPositionBase: ObservableGauge;
   private perpPositionQuote: ObservableGauge;
   private unrealizedPnL: ObservableGauge;
+  private levelGauge: ObservableGauge;
   private unrealizedFundingPnL: ObservableGauge;
   private runtimeSpec: RuntimeSpec;
   private mutexBusyCounter: Counter;
   private errorCounter: Counter;
   private tryMakeDurationHistogram: Histogram;
+  private levels: LevelParams;
+  private lastPlaced: number;
+  private needOrderUpdate = true;
 
   private agentState: State;
+  private marketEnabled: number[] = [];
 
   /**
    * Set true to enforce max position size
@@ -147,12 +157,25 @@ export class FloatingPerpMakerBot implements Bot {
     clearingHouse: DriftClient,
     slotSubscriber: SlotSubscriber,
     runtimeSpec: RuntimeSpec,
-    config: BaseBotConfig
+    config: FloatingMakerConfig
   ) {
     this.name = config.botId;
     this.dryRun = config.dryRun;
     this.driftClient = clearingHouse;
     this.slotSubscriber = slotSubscriber;
+    for (const i of [0, 1, 2, 3, 4, 5]) {
+      const x = INDEX_TO_LETTERS[i];
+      const name = INDEX_TO_NAME[i];
+      if (!config.marketEnabled[x]) continue;
+      this.marketEnabled.push(i);
+      logger.info(`${name} enabled`);
+    }
+
+    fs.readFile('./levels.json', (err, data) => {
+      if (err) throw err;
+      this.levels = JSON.parse(data.toString());
+      console.log(this.levels);
+    });
 
     this.metricsPort = config.metricsPort;
     if (this.metricsPort) {
@@ -258,6 +281,12 @@ export class FloatingPerpMakerBot implements Bot {
         description: 'The account unrealized funding PnL',
       }
     );
+    this.levelGauge = this.meter.createObservableGauge(
+      METRIC_TYPES.levels,
+      {
+        description: 'Level settings',
+      }
+    );
     this.perpPositionValue = this.meter.createObservableGauge(
       METRIC_TYPES.perp_position_value,
       {
@@ -293,21 +322,22 @@ export class FloatingPerpMakerBot implements Bot {
           const userAccount = user.getUserAccount();
           const oracle =
             this.driftClient.getOracleDataForPerpMarket(accMarketIdx);
+          const labels = metricAttrFromUserAccount(user.userAccountPublicKey, userAccount);
 
           batchObservableResult.observe(
             this.totalLeverage,
             convertToNumber(user.getLeverage(), TEN_THOUSAND),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
           batchObservableResult.observe(
             this.totalCollateral,
             convertToNumber(user.getTotalCollateral(), QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
           batchObservableResult.observe(
             this.freeCollateral,
             convertToNumber(user.getFreeCollateral(), QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
           batchObservableResult.observe(
             this.perpPositionValue,
@@ -315,19 +345,19 @@ export class FloatingPerpMakerBot implements Bot {
               user.getPerpPositionValue(accMarketIdx, oracle),
               QUOTE_PRECISION
             ),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
 
           const perpPosition = user.getPerpPosition(accMarketIdx);
           batchObservableResult.observe(
             this.perpPositionBase,
             convertToNumber(perpPosition.baseAssetAmount, BASE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
           batchObservableResult.observe(
             this.perpPositionQuote,
             convertToNumber(perpPosition.quoteAssetAmount, QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
 
           batchObservableResult.observe(
@@ -336,7 +366,7 @@ export class FloatingPerpMakerBot implements Bot {
               user.getInitialMarginRequirement(),
               QUOTE_PRECISION
             ),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
           batchObservableResult.observe(
             this.maintenanceMarginRequirement,
@@ -344,17 +374,46 @@ export class FloatingPerpMakerBot implements Bot {
               user.getMaintenanceMarginRequirement(),
               QUOTE_PRECISION
             ),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
           batchObservableResult.observe(
             this.unrealizedPnL,
             convertToNumber(user.getUnrealizedPNL(), QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
           );
           batchObservableResult.observe(
             this.unrealizedFundingPnL,
             convertToNumber(user.getUnrealizedFundingPNL(), QUOTE_PRECISION),
-            metricAttrFromUserAccount(user.userAccountPublicKey, userAccount)
+            labels
+          );
+          batchObservableResult.observe(
+            this.unrealizedFundingPnL,
+            convertToNumber(user.getUnrealizedFundingPNL(), QUOTE_PRECISION),
+            labels
+          );
+
+          const bidLabels = {...labels};
+          bidLabels.side = 'bid';
+          batchObservableResult.observe(
+            this.levelGauge,
+            this.levels[accMarketIdx].bid,
+            bidLabels
+          );
+
+          const askLabels = {...labels};
+          askLabels.side = 'bid';
+          batchObservableResult.observe(
+            this.levelGauge,
+            this.levels[accMarketIdx].bid,
+            askLabels
+          );
+
+          const spreadLabels = {...labels};
+          spreadLabels.side = 'spread';
+          batchObservableResult.observe(
+            this.levelGauge,
+            this.levels[accMarketIdx].bid,
+            spreadLabels
           );
         }
       },
@@ -369,6 +428,7 @@ export class FloatingPerpMakerBot implements Bot {
         this.maintenanceMarginRequirement,
         this.unrealizedPnL,
         this.unrealizedFundingPnL,
+        this.levelGauge
       ]
     );
 
@@ -604,34 +664,48 @@ export class FloatingPerpMakerBot implements Bot {
 
     // cancel orders if not quoting both sides of the market
     let placeNewOrders = openOrders.length === 0;
+    const currentState = this.agentState.stateType.get(marketIndex);
 
-    if (
-      (openOrders.length > 0 && openOrders.length != 2)
-    ) {
+    const isClosingOneDirection = currentState === StateType.CLOSING_SHORT || currentState === StateType.CLOSING_LONG;
+    const isOpenTradeTimedOut = this.lastPlaced < new Date().getTime() - 60 * 1000 * 5;
+
+    if (openOrders.length > 0 && (isOpenTradeTimedOut || this.needOrderUpdate || (isClosingOneDirection && openOrders.length > 1) || (!isClosingOneDirection && openOrders.length !== 2))) {
       // cancel orders
       for (const o of openOrders) {
-        const tx = await this.driftClient.cancelOrder(o.orderId);
-        console.log(
+        this.driftClient.cancelOrder(o.orderId).then(tx => console.log(
           `${this.name} cancelling order ${this.driftClient
           .getUserAccount()
           .authority.toBase58()}-${o.orderId}: ${tx}`
-        );
+        ));
       }
       placeNewOrders = true;
     }
+
+    this.needOrderUpdate = false;
 
     if (placeNewOrders) {
       // let biasNum = new BN(90);
       // let biasDenom = new BN(100);
 
-      const bestMid = (convertToNumber(bestBid, PRICE_PRECISION) + convertToNumber(bestAsk, PRICE_PRECISION)) / 2;
+      const bestBidNb = convertToNumber(bestBid, PRICE_PRECISION);
+      const bestAskNb = convertToNumber(bestAsk, PRICE_PRECISION);
+      const bestMid = (bestBidNb + bestAskNb) / 2;
       const oraclePrice = convertToNumber(oracle.price, PRICE_PRECISION);
-      const bidWanted = bestMid - 0.01;
-      const askWanted = bestMid + 0.01;
+      this.lastPlaced = new Date().getTime();
+
+      let bidWanted = bestBidNb - this.levels[marketIndex].bid;
+      let askWanted = bestAskNb + this.levels[marketIndex].ask;
+
+      console.log("Bid/Ask wanted", bidWanted, askWanted);
+
+      if (askWanted - bidWanted < this.levels[marketIndex].minSpread) {
+        bidWanted = bestMid - this.levels[marketIndex].minSpread / 2;
+        askWanted = bestMid + this.levels[marketIndex].minSpread / 2;
+        console.log("Bid/Ask spread too small so we change ->", bidWanted, askWanted);
+      }
+
       const bidOffset = new BN((bidWanted - oraclePrice) * PRICE_PRECISION.toNumber()).toNumber();
       const askOffset = new BN((askWanted - oraclePrice) * PRICE_PRECISION.toNumber()).toNumber();
-
-      const currentState = this.agentState.stateType.get(marketIndex);
 
       if (!this.RESTRICT_POSITION_SIZE || currentState !== StateType.CLOSING_LONG) {
         // const oracleBidSpread = oracle.price.sub(bestBid);
@@ -662,6 +736,20 @@ export class FloatingPerpMakerBot implements Bot {
     this.lastSlotMarketUpdated.set(marketIndex, currSlot);
   }
 
+  public updateLevels(levels: LevelParams) {
+
+    fs.writeFile('./levels.json', JSON.stringify(levels), (err) => {
+      if (err) throw err;
+      console.log('The file has been saved!');
+    });
+
+    this.levels = levels;
+    this.needOrderUpdate = true;
+
+    console.log('Levels updated');
+    console.log(this.levels);
+  }
+
   private async updateOpenOrders() {
     const start = Date.now();
     let ran = false;
@@ -683,7 +771,7 @@ export class FloatingPerpMakerBot implements Bot {
         await Promise.all(
           this.driftClient.getPerpMarketAccounts().map((marketAccount) => {
 
-            if (marketAccount.marketIndex !== 0) return;
+            if (!this.marketEnabled.includes(marketAccount.marketIndex)) return;
 
             console.log(
               `${this.name} updating open orders for market ${marketAccount.marketIndex}`
