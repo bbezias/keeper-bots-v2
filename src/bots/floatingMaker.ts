@@ -57,7 +57,7 @@ type State = {
   stateType: Map<number, StateType>;
 };
 
-type LevelParams = { [marketIndex: number]: { bid: number, ask: number, minSpread: number } }
+type LevelParams = { [marketIndex: number]: { bid: number, ask: number, minSpread: number, amount: number } }
 
 const dlobMutexError = new Error('dlobMutex timeout');
 
@@ -708,12 +708,13 @@ export class FloatingPerpMakerBot implements Bot {
       const askOffset = new BN((askWanted - oraclePrice) * PRICE_PRECISION.toNumber()).toNumber();
 
       if (!this.RESTRICT_POSITION_SIZE || currentState !== StateType.CLOSING_LONG) {
+
         // const oracleBidSpread = oracle.price.sub(bestBid);
         this.driftClient.placePerpOrder({
           marketIndex: marketIndex,
           orderType: OrderType.LIMIT,
           direction: PositionDirection.LONG,
-          baseAssetAmount: new BN(BASE_PRECISION.toNumber() * 0.1),
+          baseAssetAmount: new BN(BASE_PRECISION.toNumber() * this.levels[marketIndex].amount),
           postOnly: PostOnlyParams.MUST_POST_ONLY,
           oraclePriceOffset: bidOffset, // limit bid below oracle,
         }).then(tx0 => console.log(`${this.name} placing long: ${tx0}`));
@@ -725,7 +726,7 @@ export class FloatingPerpMakerBot implements Bot {
           marketIndex: marketIndex,
           orderType: OrderType.LIMIT,
           direction: PositionDirection.SHORT,
-          baseAssetAmount: new BN(BASE_PRECISION.toNumber() * 0.1),
+          baseAssetAmount: new BN(BASE_PRECISION.toNumber() * this.levels[marketIndex].amount),
           postOnly: PostOnlyParams.MUST_POST_ONLY,
           oraclePriceOffset: askOffset, // limit ask above oracle
         }).then(tx1 => console.log(`${this.name} placing short: ${tx1}`));
