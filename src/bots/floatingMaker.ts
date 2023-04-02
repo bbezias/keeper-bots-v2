@@ -98,6 +98,8 @@ export class FloatingPerpMakerBot implements Bot {
   private driftClient: DriftClient;
   private slotSubscriber: SlotSubscriber;
   private periodicTaskMutex = new Mutex();
+  private longMutex = new Mutex();
+  private shortMutex = new Mutex();
   private lastSlotMarketUpdated: Map<number, number> = new Map();
 
   private intervalIds: Array<NodeJS.Timer> = [];
@@ -392,7 +394,7 @@ export class FloatingPerpMakerBot implements Bot {
             labels
           );
 
-          const bidLabels = {...labels};
+          const bidLabels = { ...labels };
           bidLabels.side = 'bid';
           batchObservableResult.observe(
             this.levelGauge,
@@ -400,7 +402,7 @@ export class FloatingPerpMakerBot implements Bot {
             bidLabels
           );
 
-          const askLabels = {...labels};
+          const askLabels = { ...labels };
           askLabels.side = 'bid';
           batchObservableResult.observe(
             this.levelGauge,
@@ -408,7 +410,7 @@ export class FloatingPerpMakerBot implements Bot {
             askLabels
           );
 
-          const spreadLabels = {...labels};
+          const spreadLabels = { ...labels };
           spreadLabels.side = 'spread';
           batchObservableResult.observe(
             this.levelGauge,
@@ -708,7 +710,7 @@ export class FloatingPerpMakerBot implements Bot {
       const askOffset = new BN((askWanted - oraclePrice) * PRICE_PRECISION.toNumber()).toNumber();
 
       if (!this.RESTRICT_POSITION_SIZE || currentState !== StateType.CLOSING_LONG) {
-
+        const release = await this.longMutex.acquire();
         // const oracleBidSpread = oracle.price.sub(bestBid);
         this.driftClient.placePerpOrder({
           marketIndex: marketIndex,
@@ -717,11 +719,16 @@ export class FloatingPerpMakerBot implements Bot {
           baseAssetAmount: new BN(BASE_PRECISION.toNumber() * this.levels[marketIndex].amount),
           postOnly: PostOnlyParams.MUST_POST_ONLY,
           oraclePriceOffset: bidOffset, // limit bid below oracle,
-        }).then(tx0 => console.log(`${this.name} placing long: ${tx0}`));
+        }).then(tx0 => console.log(`${this.name} placing long: ${tx0}`)).catch(
+          e => logger.error(`Error on place long order: ${e}`)
+        ).finally(() => {
+          release();
+        });
       }
 
       if (!this.RESTRICT_POSITION_SIZE || currentState !== StateType.CLOSING_SHORT) {
         // const oracleAskSpread = bestAsk.sub(oracle.price);
+        const release = await this.shortMutex.acquire();
         this.driftClient.placePerpOrder({
           marketIndex: marketIndex,
           orderType: OrderType.LIMIT,
@@ -729,7 +736,11 @@ export class FloatingPerpMakerBot implements Bot {
           baseAssetAmount: new BN(BASE_PRECISION.toNumber() * this.levels[marketIndex].amount),
           postOnly: PostOnlyParams.MUST_POST_ONLY,
           oraclePriceOffset: askOffset, // limit ask above oracle
-        }).then(tx1 => console.log(`${this.name} placing short: ${tx1}`));
+        }).then(tx1 => console.log(`${this.name} placing short: ${tx1}`)).catch(
+          e => logger.error(`Error on place long order: ${e}`)
+        ).finally(() => {
+          release();
+        });
       }
     }
 
@@ -773,6 +784,8 @@ export class FloatingPerpMakerBot implements Bot {
           this.driftClient.getPerpMarketAccounts().map((marketAccount) => {
 
             if (!this.marketEnabled.includes(marketAccount.marketIndex)) return;
+
+            if (this.longMutex.isLocked() || this.shortMutex.isLocked()) return;
 
             console.log(
               `${this.name} updating open orders for market ${marketAccount.marketIndex}`
