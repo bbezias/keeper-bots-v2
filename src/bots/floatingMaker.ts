@@ -58,6 +58,7 @@ type State = {
 };
 
 type LevelParams = { [marketIndex: number]: { bid: number, ask: number, minSpread: number, amount: number } }
+type Config = { maxExposure: number, levels: LevelParams };
 
 const dlobMutexError = new Error('dlobMutex timeout');
 
@@ -173,9 +174,11 @@ export class FloatingPerpMakerBot implements Bot {
       logger.info(`${name} enabled`);
     }
 
-    fs.readFile('./levels.json', (err, data) => {
+    fs.readFile('./config.json', (err, data) => {
       if (err) throw err;
-      this.levels = JSON.parse(data.toString());
+      const params: Config = JSON.parse(data.toString());
+      this.levels = params.levels;
+      this.MAX_POSITION_EXPOSURE = params.maxExposure;
       console.log(this.levels);
     });
 
@@ -754,18 +757,20 @@ export class FloatingPerpMakerBot implements Bot {
     this.lastSlotMarketUpdated.set(marketIndex, currSlot);
   }
 
-  public updateLevels(levels: LevelParams) {
+  public updateParams(config: Config) {
 
-    fs.writeFile('./levels.json', JSON.stringify(levels), (err) => {
+    fs.writeFile('./config.json', JSON.stringify(config), (err) => {
       if (err) throw err;
       console.log('The file has been saved!');
     });
 
-    this.levels = levels;
+    this.levels = config.levels;
+    this.MAX_POSITION_EXPOSURE = config.maxExposure;
     this.needOrderUpdate = true;
 
-    console.log('Levels updated');
+    console.log('Config updated');
     console.log(this.levels);
+    console.log(this.MAX_POSITION_EXPOSURE);
   }
 
   private async updateOpenOrders() {

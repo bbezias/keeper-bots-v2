@@ -702,7 +702,7 @@ const runBot = async () => {
           const data = JSON.parse(body);
           for (const bot of bots) {
             if (bot.name === "floatingMaker") {
-              (bot as FloatingPerpMakerBot).updateLevels(data);
+              (bot as FloatingPerpMakerBot).updateParams(data);
             }
           }
           // do something with the JSON data here
