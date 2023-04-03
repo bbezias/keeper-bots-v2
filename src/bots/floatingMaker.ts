@@ -100,8 +100,8 @@ export class FloatingPerpMakerBot implements Bot {
   private driftClient: DriftClient;
   private slotSubscriber: SlotSubscriber;
   private periodicTaskMutex = new Mutex();
-  private longMutex = new Mutex();
-  private shortMutex = new Mutex();
+  private longMutex: { [marketId: number]: Mutex };
+  private shortMutex: { [marketId: number]: Mutex };
   private lastSlotMarketUpdated: Map<number, number> = new Map();
 
   private intervalIds: Array<NodeJS.Timer> = [];
@@ -168,10 +168,14 @@ export class FloatingPerpMakerBot implements Bot {
     this.dryRun = config.dryRun;
     this.driftClient = clearingHouse;
     this.slotSubscriber = slotSubscriber;
+    this.longMutex = {};
+    this.shortMutex = {};
     for (const i of [0, 1, 2, 3, 4, 5]) {
       const x = INDEX_TO_LETTERS[i];
       const name = INDEX_TO_NAME[i];
       if (!config.marketEnabled[x]) continue;
+      this.longMutex[i] = new Mutex();
+      this.shortMutex[i] = new Mutex();
       this.marketEnabled.push(i);
       logger.info(`${name} enabled`);
     }
@@ -734,7 +738,7 @@ export class FloatingPerpMakerBot implements Bot {
       const askOffset = new BN((askWanted - oraclePrice) * PRICE_PRECISION.toNumber()).toNumber();
 
       if (!this.RESTRICT_POSITION_SIZE || currentState !== StateType.CLOSING_LONG) {
-        const release = await this.longMutex.acquire();
+        const release = await this.longMutex[marketIndex].acquire();
         // const oracleBidSpread = oracle.price.sub(bestBid);
         this.driftClient.placePerpOrder({
           marketIndex: marketIndex,
@@ -752,7 +756,7 @@ export class FloatingPerpMakerBot implements Bot {
 
       if (!this.RESTRICT_POSITION_SIZE || currentState !== StateType.CLOSING_SHORT) {
         // const oracleAskSpread = bestAsk.sub(oracle.price);
-        const release = await this.shortMutex.acquire();
+        const release = await this.shortMutex[marketIndex].acquire();
         this.driftClient.placePerpOrder({
           marketIndex: marketIndex,
           orderType: OrderType.LIMIT,
@@ -811,7 +815,7 @@ export class FloatingPerpMakerBot implements Bot {
 
             if (!this.marketEnabled.includes(marketAccount.marketIndex)) return;
 
-            if (this.longMutex.isLocked() || this.shortMutex.isLocked()) return;
+            if (this.longMutex[marketAccount.marketIndex].isLocked() || this.shortMutex[marketAccount.marketIndex].isLocked()) return;
 
             console.log(
               `${this.name} updating open orders for market ${marketAccount.marketIndex}`
