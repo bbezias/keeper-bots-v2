@@ -566,7 +566,7 @@ export class FloatingPerpMakerBot implements Bot {
           p.quoteAssetAmount,
           QUOTE_PRECISION
         );
-        const exposure = positionValue / accountCollateral;
+        const exposure = Math.abs(positionValue / accountCollateral);
 
         if (exposure >= this.MAX_POSITION_EXPOSURE) {
           // state becomes closing only
