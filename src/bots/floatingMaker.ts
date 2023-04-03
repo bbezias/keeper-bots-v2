@@ -139,7 +139,7 @@ export class FloatingPerpMakerBot implements Bot {
   private tryMakeDurationHistogram: Histogram;
   private levels: LevelParams;
   private lastPlaced: number;
-  private needOrderUpdate = true;
+  private needOrderUpdate: {[marketId: number]: boolean} = {};
 
   private agentState: State;
   private marketEnabled: number[] = [];
@@ -170,12 +170,14 @@ export class FloatingPerpMakerBot implements Bot {
     this.slotSubscriber = slotSubscriber;
     this.longMutex = {};
     this.shortMutex = {};
+    this.needOrderUpdate = {};
     for (const i of [0, 1, 2, 3, 4, 5]) {
       const x = INDEX_TO_LETTERS[i];
       const name = INDEX_TO_NAME[i];
       if (!config.marketEnabled[x]) continue;
       this.longMutex[i] = new Mutex();
       this.shortMutex[i] = new Mutex();
+      this.needOrderUpdate[i] = true;
       this.marketEnabled.push(i);
       logger.info(`${name} enabled`);
     }
@@ -699,7 +701,7 @@ export class FloatingPerpMakerBot implements Bot {
     const isClosingOneDirection = currentState === StateType.CLOSING_SHORT || currentState === StateType.CLOSING_LONG;
     const isOpenTradeTimedOut = this.lastPlaced < new Date().getTime() - 60 * 1000 * 5;
 
-    if (openOrders.length > 0 && (isOpenTradeTimedOut || this.needOrderUpdate || (isClosingOneDirection && openOrders.length > 1) || (!isClosingOneDirection && openOrders.length !== 2))) {
+    if (openOrders.length > 0 && (isOpenTradeTimedOut || this.needOrderUpdate[marketIndex] || (isClosingOneDirection && openOrders.length > 1) || (!isClosingOneDirection && openOrders.length !== 2))) {
       // cancel orders
       for (const o of openOrders) {
         this.driftClient.cancelOrder(o.orderId).then(tx => console.log(
@@ -711,7 +713,7 @@ export class FloatingPerpMakerBot implements Bot {
       placeNewOrders = true;
     }
 
-    this.needOrderUpdate = false;
+    this.needOrderUpdate[marketIndex] = false;
 
     if (placeNewOrders) {
       // let biasNum = new BN(90);
@@ -785,7 +787,9 @@ export class FloatingPerpMakerBot implements Bot {
 
     this.levels = config.levels;
     this.MAX_POSITION_EXPOSURE = config.maxExposure;
-    this.needOrderUpdate = true;
+    for (const marketIndex of this.marketEnabled) {
+      this.needOrderUpdate[marketIndex] = true;
+    }
 
     console.log('Config updated');
     console.log(this.levels);
