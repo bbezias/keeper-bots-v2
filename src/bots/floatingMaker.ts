@@ -341,26 +341,6 @@ export class FloatingPerpMakerBot implements Bot {
             convertToNumber(user.getFreeCollateral(), QUOTE_PRECISION),
             labels
           );
-          batchObservableResult.observe(
-            this.perpPositionValue,
-            convertToNumber(
-              user.getPerpPositionValue(accMarketIdx, oracle),
-              QUOTE_PRECISION
-            ),
-            labels
-          );
-
-          const perpPosition = user.getPerpPosition(accMarketIdx);
-          batchObservableResult.observe(
-            this.perpPositionBase,
-            convertToNumber(perpPosition.baseAssetAmount, BASE_PRECISION),
-            labels
-          );
-          batchObservableResult.observe(
-            this.perpPositionQuote,
-            convertToNumber(perpPosition.quoteAssetAmount, QUOTE_PRECISION),
-            labels
-          );
 
           batchObservableResult.observe(
             this.initialMarginRequirement,
@@ -394,29 +374,55 @@ export class FloatingPerpMakerBot implements Bot {
             labels
           );
 
-          const bidLabels = { ...labels };
-          bidLabels.side = 'bid';
-          batchObservableResult.observe(
-            this.levelGauge,
-            this.levels[accMarketIdx].bid,
-            bidLabels
-          );
+          for (const marketIndex of this.marketEnabled) {
+            console.log('market index', marketIndex);
+            const labelWithMarket = { ...labels };
+            labelWithMarket.market = INDEX_TO_NAME[marketIndex];
+            batchObservableResult.observe(
+              this.perpPositionValue,
+              convertToNumber(
+                user.getPerpPositionValue(marketIndex, oracle),
+                QUOTE_PRECISION
+              ),
+              labelWithMarket
+            );
 
-          const askLabels = { ...labels };
-          askLabels.side = 'bid';
-          batchObservableResult.observe(
-            this.levelGauge,
-            this.levels[accMarketIdx].bid,
-            askLabels
-          );
+            const perpPosition = user.getPerpPosition(marketIndex);
+            batchObservableResult.observe(
+              this.perpPositionBase,
+              convertToNumber(perpPosition.baseAssetAmount, BASE_PRECISION),
+              labelWithMarket
+            );
+            batchObservableResult.observe(
+              this.perpPositionQuote,
+              convertToNumber(perpPosition.quoteAssetAmount, QUOTE_PRECISION),
+              labelWithMarket
+            );
 
-          const spreadLabels = { ...labels };
-          spreadLabels.side = 'spread';
-          batchObservableResult.observe(
-            this.levelGauge,
-            this.levels[accMarketIdx].bid,
-            spreadLabels
-          );
+            const bidLabels = { ...labelWithMarket };
+            bidLabels.side = 'bid';
+            batchObservableResult.observe(
+              this.levelGauge,
+              this.levels[marketIndex].bid,
+              bidLabels
+            );
+
+            const askLabels = { ...labelWithMarket };
+            askLabels.side = 'bid';
+            batchObservableResult.observe(
+              this.levelGauge,
+              this.levels[marketIndex].bid,
+              askLabels
+            );
+
+            const spreadLabels = { ...labelWithMarket };
+            spreadLabels.side = 'spread';
+            batchObservableResult.observe(
+              this.levelGauge,
+              this.levels[marketIndex].bid,
+              spreadLabels
+            );
+          }
         }
       },
       [
