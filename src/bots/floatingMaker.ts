@@ -74,6 +74,7 @@ enum METRIC_TYPES {
   unrealized_pnl = 'unrealized_pnl',
   unrealized_funding_pnl = 'unrealized_funding_pnl',
   levels = 'levels',
+  max_exposure = 'max_exposure',
   initial_margin_requirement = 'initial_margin_requirement',
   maintenance_margin_requirement = 'maintenance_margin_requirement',
   total_collateral = 'total_collateral',
@@ -130,6 +131,7 @@ export class FloatingPerpMakerBot implements Bot {
   private perpPositionQuote: ObservableGauge;
   private unrealizedPnL: ObservableGauge;
   private levelGauge: ObservableGauge;
+  private maxExposureGauge: ObservableGauge;
   private unrealizedFundingPnL: ObservableGauge;
   private runtimeSpec: RuntimeSpec;
   private mutexBusyCounter: Counter;
@@ -292,6 +294,12 @@ export class FloatingPerpMakerBot implements Bot {
         description: 'Level settings',
       }
     );
+    this.maxExposureGauge = this.meter.createObservableGauge(
+      METRIC_TYPES.max_exposure,
+      {
+        description: 'Max exposure settings',
+      }
+    );
     this.perpPositionValue = this.meter.createObservableGauge(
       METRIC_TYPES.perp_position_value,
       {
@@ -377,6 +385,12 @@ export class FloatingPerpMakerBot implements Bot {
             labels
           );
 
+          batchObservableResult.observe(
+            this.maxExposureGauge,
+            this.MAX_POSITION_EXPOSURE,
+            labels
+          );
+
           for (const marketIndex of this.marketEnabled) {
             console.log('market index', marketIndex);
             const labelWithMarket = { ...labels };
@@ -439,7 +453,8 @@ export class FloatingPerpMakerBot implements Bot {
         this.maintenanceMarginRequirement,
         this.unrealizedPnL,
         this.unrealizedFundingPnL,
-        this.levelGauge
+        this.levelGauge,
+        this.maxExposureGauge
       ]
     );
 
