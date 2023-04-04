@@ -13,7 +13,7 @@ import {
   PRICE_PRECISION,
   Order,
   PerpPosition,
-  PerpMarkets, MarketType, DLOB, UserMap, UserStatsMap, OrderRecord, NewUserRecord, PostOnlyParams, QUOTE_PRECISION, TEN_THOUSAND,
+  PerpMarkets, MarketType, DLOB, UserMap, UserStatsMap, OrderRecord, NewUserRecord, PostOnlyParams, QUOTE_PRECISION, TEN_THOUSAND, ZERO,
 } from '@drift-labs/sdk';
 import { Mutex, tryAcquire, E_ALREADY_LOCKED, withTimeout } from 'async-mutex';
 
@@ -139,7 +139,7 @@ export class FloatingPerpMakerBot implements Bot {
   private tryMakeDurationHistogram: Histogram;
   private levels: LevelParams;
   private lastPlaced: number;
-  private needOrderUpdate: {[marketId: number]: boolean} = {};
+  private needOrderUpdate: { [marketId: number]: boolean } = {};
 
   private agentState: State;
   private marketEnabled: number[] = [];
@@ -563,10 +563,27 @@ export class FloatingPerpMakerBot implements Bot {
    * @returns {Promise<void>}
    */
   private updateAgentState(): void {
+
+    const perpPositions: { [marketIndex: number]: PerpPosition } = {};
+
+    for (const p of this.marketEnabled) {
+      perpPositions[p] = undefined;
+    }
+
     this.driftClient.getUserAccount().perpPositions.map((p) => {
-      if (p.baseAssetAmount.isZero()) {
-        return;
+      if (this.marketEnabled.includes(p.marketIndex)) {
+        if (!perpPositions[p.marketIndex] || !p.baseAssetAmount.eq(ZERO)) {
+          perpPositions[p.marketIndex] = p;
+        }
       }
+    });
+
+    for (const marketIndex of this.marketEnabled) {
+
+      const p = perpPositions[marketIndex];
+
+      if (!p) continue;
+
       this.agentState.marketPosition.set(p.marketIndex, p);
 
       // update state
@@ -622,8 +639,7 @@ export class FloatingPerpMakerBot implements Bot {
           }
         }
       }
-
-    });
+    }
 
     // zero out the open orders
     for (const market of PerpMarkets[driftEnv]) {
