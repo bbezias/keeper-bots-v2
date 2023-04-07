@@ -159,96 +159,106 @@ logger.info(
 setLogLevel(config.global.debug ? 'debug' : 'info');
 
 export class OracleSource {
-	static readonly PYTH = { pyth: {} };
-	static readonly PYTH_1K = { pyth1K: {} };
-	static readonly PYTH_1M = { pyth1M: {} };
-	// static readonly SWITCHBOARD = { switchboard: {} };
-	static readonly QUOTE_ASSET = { quoteAsset: {} };
+  static readonly PYTH = { pyth: {} };
+  static readonly PYTH_1K = { pyth1K: {} };
+  static readonly PYTH_1M = { pyth1M: {} };
+  // static readonly SWITCHBOARD = { switchboard: {} };
+  static readonly QUOTE_ASSET = { quoteAsset: {} };
 }
 
 export type PerpMarketConfig = {
-	fullName?: string;
-	category?: string[];
-	symbol: string;
-	baseAssetSymbol: string;
-	marketIndex: number;
-	launchTs: number;
-	oracle: PublicKey;
-	oracleSource: OracleSource;
+  fullName?: string;
+  category?: string[];
+  symbol: string;
+  baseAssetSymbol: string;
+  marketIndex: number;
+  launchTs: number;
+  oracle: PublicKey;
+  oracleSource: OracleSource;
 };
 
 export const MainnetPerpMarkets: PerpMarketConfig[] = [
-    {
-      fullName: 'Solana',
-      category: ['L1', 'Infra'],
-      symbol: 'SOL-PERP',
-      baseAssetSymbol: 'SOL',
-      marketIndex: 0,
-      oracle: new PublicKey('H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG'),
-      launchTs: 1667560505000,
-      oracleSource: OracleSource.PYTH,
-    },
-    {
-      fullName: 'Bitcoin',
-      category: ['L1', 'Payment'],
-      symbol: 'BTC-PERP',
-      baseAssetSymbol: 'BTC',
-      marketIndex: 1,
-      oracle: new PublicKey('GVXRSBjFk6e6J3NbVPXohDJetcTjaeeuykUpbQF8UoMU'),
-      launchTs: 1670347281000,
-      oracleSource: OracleSource.PYTH,
-    },
-    {
-      fullName: 'Ethereum',
-      category: ['L1', 'Infra'],
-      symbol: 'ETH-PERP',
-      baseAssetSymbol: 'ETH',
-      marketIndex: 2,
-      oracle: new PublicKey('JBu1AL4obBcCMqKBBxhpWCNUt136ijcuMZLFvTP7iWdB'),
-      launchTs: 1670347281000,
-      oracleSource: OracleSource.PYTH,
-    },
-    {
-      fullName: 'Aptos',
-      category: ['L1', 'Infra'],
-      symbol: 'APT-PERP',
-      baseAssetSymbol: 'APT',
-      marketIndex: 3,
-      oracle: new PublicKey('FNNvb1AFDnDVPkocEri8mWbJ1952HQZtFLuwPiUjSJQ'),
-      launchTs: 1675802661000,
-      oracleSource: OracleSource.PYTH,
-    },
-    {
-      fullName: 'Bonk',
-      category: ['Meme'],
-      symbol: '1MBONK-PERP',
-      baseAssetSymbol: '1MBONK',
-      marketIndex: 4,
-      oracle: new PublicKey('8ihFLu5FimgTQ1Unh4dVyEHUGodJ5gJQCrQf4KUVB9bN'),
-      launchTs: 1677690149000,
-      oracleSource: OracleSource.PYTH_1M,
-    },
-    {
-      fullName: 'Polygon',
-      category: ['L2', 'Infra'],
-      symbol: 'MATIC-PERP',
-      baseAssetSymbol: 'MATIC',
-      marketIndex: 5,
-      oracle: new PublicKey('7KVswB9vkCgeM3SHP7aGDijvdRAHK8P5wi9JXViCrtYh'),
-      launchTs: 1677690149000, //todo
-      oracleSource: OracleSource.PYTH,
-    },
-    {
-      fullName: 'Arbitrum',
-      category: ['L2', 'Infra'],
-      symbol: 'ARB-PERP',
-      baseAssetSymbol: 'ARB',
-      marketIndex: 6,
-      oracle: new PublicKey('5HRrdmghsnU3i2u5StaKaydS7eq3vnKVKwXMzCNKsc4C'),
-      launchTs: 1679501812000, //todo
-      oracleSource: OracleSource.PYTH,
-    },
-  ];
+  {
+    fullName: 'Solana',
+    category: ['L1', 'Infra'],
+    symbol: 'SOL-PERP',
+    baseAssetSymbol: 'SOL',
+    marketIndex: 0,
+    oracle: new PublicKey('H6ARHf6YXhGYeQfUzQNGk6rDNnLBQKrenN712K4AQJEG'),
+    launchTs: 1667560505000,
+    oracleSource: OracleSource.PYTH,
+  },
+  {
+    fullName: 'Bitcoin',
+    category: ['L1', 'Payment'],
+    symbol: 'BTC-PERP',
+    baseAssetSymbol: 'BTC',
+    marketIndex: 1,
+    oracle: new PublicKey('GVXRSBjFk6e6J3NbVPXohDJetcTjaeeuykUpbQF8UoMU'),
+    launchTs: 1670347281000,
+    oracleSource: OracleSource.PYTH,
+  },
+  {
+    fullName: 'Ethereum',
+    category: ['L1', 'Infra'],
+    symbol: 'ETH-PERP',
+    baseAssetSymbol: 'ETH',
+    marketIndex: 2,
+    oracle: new PublicKey('JBu1AL4obBcCMqKBBxhpWCNUt136ijcuMZLFvTP7iWdB'),
+    launchTs: 1670347281000,
+    oracleSource: OracleSource.PYTH,
+  },
+  {
+    fullName: 'Aptos',
+    category: ['L1', 'Infra'],
+    symbol: 'APT-PERP',
+    baseAssetSymbol: 'APT',
+    marketIndex: 3,
+    oracle: new PublicKey('FNNvb1AFDnDVPkocEri8mWbJ1952HQZtFLuwPiUjSJQ'),
+    launchTs: 1675802661000,
+    oracleSource: OracleSource.PYTH,
+  },
+  {
+    fullName: 'Bonk',
+    category: ['Meme'],
+    symbol: '1MBONK-PERP',
+    baseAssetSymbol: '1MBONK',
+    marketIndex: 4,
+    oracle: new PublicKey('8ihFLu5FimgTQ1Unh4dVyEHUGodJ5gJQCrQf4KUVB9bN'),
+    launchTs: 1677690149000,
+    oracleSource: OracleSource.PYTH_1M,
+  },
+  {
+    fullName: 'Polygon',
+    category: ['L2', 'Infra'],
+    symbol: 'MATIC-PERP',
+    baseAssetSymbol: 'MATIC',
+    marketIndex: 5,
+    oracle: new PublicKey('7KVswB9vkCgeM3SHP7aGDijvdRAHK8P5wi9JXViCrtYh'),
+    launchTs: 1677690149000, //todo
+    oracleSource: OracleSource.PYTH,
+  },
+  {
+    fullName: 'Arbitrum',
+    category: ['L2', 'Infra'],
+    symbol: 'ARB-PERP',
+    baseAssetSymbol: 'ARB',
+    marketIndex: 6,
+    oracle: new PublicKey('5HRrdmghsnU3i2u5StaKaydS7eq3vnKVKwXMzCNKsc4C'),
+    launchTs: 1679501812000, //todo
+    oracleSource: OracleSource.PYTH,
+  },
+  {
+		fullName: 'Doge',
+		category: ['Meme', 'Dog'],
+		symbol: 'DOGE-PERP',
+		baseAssetSymbol: 'DOGE',
+		marketIndex: 7,
+		oracle: new PublicKey('FsSM3s38PX9K7Dn6eGzuE29S2Dsk1Sss1baytTQdCaQj'),
+		launchTs: 1680808053000,
+		oracleSource: OracleSource.PYTH,
+	},
+];
 
 export function getWallet(): Wallet {
   const privateKey = config.global.keeperPrivateKey;
