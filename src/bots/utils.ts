@@ -30,7 +30,9 @@ export enum KUCOIN_CONTRACTS {
   btc = 'XBTUSDTM',
   eth = 'ETHUSDTM',
   apt = 'APTUSDTM',
-  matic = 'MATICUSDTM'
+  matic = 'MATICUSDTM',
+  doge = 'DOGEUSDTM',
+  arb = 'ARBUSDTM',
 }
 
 export const INDEX_TO_NAME = {
@@ -38,7 +40,10 @@ export const INDEX_TO_NAME = {
   1: 'Bitcoin',
   2: 'Ethereum',
   3: 'Aptos',
-  5: 'Polygon'
+  4: 'Bonk',
+  5: 'Polygon',
+  6: 'Arbitrum',
+  7: 'Doge'
 };
 
 export const INDEX_TO_LETTERS = {
@@ -46,7 +51,10 @@ export const INDEX_TO_LETTERS = {
   1: 'btc',
   2: 'eth',
   3: 'apt',
-  5: 'matic'
+  4: 'bonk',
+  5: 'matic',
+  6: 'arb',
+  7: 'doge'
 };
 
 export const SYMBOL_TO_INDEX = {
@@ -54,7 +62,9 @@ export const SYMBOL_TO_INDEX = {
   XBTUSDTM: 1,
   ETHUSDTM: 2,
   APTUSDTM: 3,
-  MATICUSDTM: 5
+  MATICUSDTM: 5,
+  ARBUSDTM: 6,
+  DOGEUSDTB: 7
 };
 
 export const INDEX_TO_SYMBOL = {
@@ -62,7 +72,9 @@ export const INDEX_TO_SYMBOL = {
   1: KUCOIN_CONTRACTS.btc,
   2: KUCOIN_CONTRACTS.eth,
   3: KUCOIN_CONTRACTS.apt,
-  5: KUCOIN_CONTRACTS.matic
+  5: KUCOIN_CONTRACTS.matic,
+  6: KUCOIN_CONTRACTS.arb,
+  7: KUCOIN_CONTRACTS.doge
 };
 
 export class MaxSizeList {

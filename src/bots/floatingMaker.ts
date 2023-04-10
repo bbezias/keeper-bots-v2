@@ -171,7 +171,7 @@ export class FloatingPerpMakerBot implements Bot {
     this.longMutex = {};
     this.shortMutex = {};
     this.needOrderUpdate = {};
-    for (const i of [0, 1, 2, 3, 4, 5]) {
+    for (const i of [0, 1, 2, 3, 4, 5, 6, 7]) {
       const x = INDEX_TO_LETTERS[i];
       const name = INDEX_TO_NAME[i];
       if (!config.marketEnabled[x]) continue;
