@@ -201,7 +201,7 @@ export class FillerBot implements Bot {
   private lastSlotReyncUserMapsMutex = new Mutex();
   private lastSlotResyncUserMaps = 0;
 
-  private prices = new Map<number, BN>();
+  private prices = new Map<number, number>();
 
   private intervalIds: Array<NodeJS.Timer> = [];
   private throttledNodes = new Map<string, number>();
@@ -500,10 +500,10 @@ export class FillerBot implements Bot {
       const oraclePriceData =
         this.driftClient.getOracleDataForPerpMarket(perp.marketIndex);
 
-      const vAsk = calculateAskPrice(perp, oraclePriceData);
-      const vBid = calculateBidPrice(perp, oraclePriceData);
+      const vAsk = calculateAskPrice(perp, oraclePriceData).toNumber();
+      const vBid = calculateBidPrice(perp, oraclePriceData).toNumber();
 
-      this.prices.set(perp.marketIndex, vAsk.add(vBid).div(new BN(2)));
+      this.prices.set(perp.marketIndex, (vBid + vAsk) / 2);
     }
     logger.info('Prices updated');
   }
@@ -1700,11 +1700,7 @@ export class FillerBot implements Bot {
         );
 
         if (filteredNodes.length > 1) {
-          filteredNodes.sort((a, b) => b.node.order.baseAssetAmountFilled.mul(this.prices.get(b.node.order.marketIndex)).toNumber() - a.node.order.baseAssetAmountFilled.mul(this.prices.get(b.node.order.marketIndex)).toNumber());
-        }
-
-        for (const x of filteredNodes) {
-          logger.info(`${x.node.order.slot} - ${x.node.order.slot}, ${x.node.order.baseAssetAmount}, ${x.node.order.baseAssetAmountFilled}`);
+          filteredNodes.sort((a, b) => b.node.order.baseAssetAmountFilled.toNumber() * this.prices.get(b.node.order.marketIndex) - a.node.order.baseAssetAmountFilled.toNumber() * this.prices.get(a.node.order.marketIndex));
         }
 
         // fill the perp nodes
