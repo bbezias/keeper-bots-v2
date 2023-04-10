@@ -138,7 +138,7 @@ export class FloatingPerpMakerBot implements Bot {
   private errorCounter: Counter;
   private tryMakeDurationHistogram: Histogram;
   private levels: LevelParams;
-  private lastPlaced: number;
+  private lastPlaced: { [marketId: number]: number } = {};
   private needOrderUpdate: { [marketId: number]: boolean } = {};
 
   private agentState: State;
@@ -715,7 +715,7 @@ export class FloatingPerpMakerBot implements Bot {
     const currentState = this.agentState.stateType.get(marketIndex);
 
     const isClosingOneDirection = currentState === StateType.CLOSING_SHORT || currentState === StateType.CLOSING_LONG;
-    const isOpenTradeTimedOut = this.lastPlaced < new Date().getTime() - 60 * 1000 * 5;
+    const isOpenTradeTimedOut = !this.lastPlaced[marketIndex] || this.lastPlaced[marketIndex] < new Date().getTime() - 60 * 1000 * 2;
 
     if (openOrders.length > 0 && (isOpenTradeTimedOut || this.needOrderUpdate[marketIndex] || (isClosingOneDirection && openOrders.length > 1) || (!isClosingOneDirection && openOrders.length !== 2))) {
       // cancel orders
@@ -739,7 +739,7 @@ export class FloatingPerpMakerBot implements Bot {
       const bestAskNb = convertToNumber(bestAsk, PRICE_PRECISION);
       const bestMid = (bestBidNb + bestAskNb) / 2;
       const oraclePrice = convertToNumber(oracle.price, PRICE_PRECISION);
-      this.lastPlaced = new Date().getTime();
+      this.lastPlaced[marketIndex] = new Date().getTime();
 
       let bidWanted = bestBidNb - this.levels[marketIndex].bid;
       let askWanted = bestAskNb + this.levels[marketIndex].ask;

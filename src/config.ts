@@ -34,7 +34,10 @@ export type FloatingMakerConfig = BaseBotConfig & {
 		btc: boolean
 		eth: boolean,
 		apt: boolean,
-		matic: boolean
+		bonk: boolean,
+		matic: boolean,
+		arb: boolean,
+		doge: boolean
 	}
 };
 
@@ -238,7 +241,7 @@ export function loadConfigFromOpts(opts: any): Config {
 			dryRun: opts.dryRun ?? false,
 			botId: process.env.BOT_ID ?? 'floatingMaker',
 			metricsPort: 9469,
-			marketEnabled: opts.marketEnabled ?? {sol: true, btc: true, eth: true, apt: true, matic: true},
+			marketEnabled: opts.marketEnabled ?? {sol: true, btc: false, eth: false, apt: false, matic: false, bonk: false, arb: false, doge: false},
 		};
 	}
 	if (opts.ifRevenueSettler) {
