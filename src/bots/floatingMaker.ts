@@ -55,6 +55,8 @@ type State = {
   marketPosition: Map<number, PerpPosition>;
   openOrders: Map<number, Array<Order>>;
   stateType: Map<number, StateType>;
+  longNotional: Map<number, number>;
+  shortNotional: Map<number, number>;
 };
 
 type LevelParams = { [marketIndex: number]: { bid: number, ask: number, minSpread: number, amount: number } }
@@ -471,6 +473,8 @@ export class FloatingPerpMakerBot implements Bot {
       marketPosition: new Map<number, PerpPosition>(),
       openOrders: new Map<number, Array<Order>>(),
       stateType: new Map<number, StateType>(),
+      shortNotional: new Map<number, number>(),
+      longNotional: new Map<number, number>(),
     };
 
     const initPromises: Array<Promise<any>> = [];
@@ -592,50 +596,56 @@ export class FloatingPerpMakerBot implements Bot {
         currentState = StateType.NEUTRAL;
       }
 
-      let canUpdateStateBasedOnPosition = true;
-      if (
-        (currentState === StateType.CLOSING_LONG &&
-          p.baseAssetAmount.gt(new BN(0))) ||
-        (currentState === StateType.CLOSING_SHORT &&
-          p.baseAssetAmount.lt(new BN(0)))
-      ) {
-        canUpdateStateBasedOnPosition = false;
-      }
+      // check if you need to enter a closing state
+      const accountCollateral = convertToNumber(
+        this.driftClient.getUser().getTotalCollateral(),
+        QUOTE_PRECISION
+      );
+      const positionValue = convertToNumber(
+        p.quoteAssetAmount,
+        QUOTE_PRECISION
+      );
+      const exposure = Math.abs(positionValue / accountCollateral);
 
-      if (canUpdateStateBasedOnPosition) {
-        // check if you need to enter a closing state
-        const accountCollateral = convertToNumber(
-          this.driftClient.getUser().getTotalCollateral(),
-          QUOTE_PRECISION
-        );
-        const positionValue = convertToNumber(
-          p.quoteAssetAmount,
-          QUOTE_PRECISION
-        );
-        const exposure = Math.abs(positionValue / accountCollateral);
+      const oracle = this.driftClient.getOracleDataForPerpMarket(marketIndex);
+      const marketAccount = this.driftClient.getPerpMarketAccount(marketIndex);
+      const vAsk = convertToNumber(calculateAskPrice(marketAccount, oracle), PRICE_PRECISION);
+      const vBid = convertToNumber(calculateBidPrice(marketAccount, oracle), PRICE_PRECISION);
+      const mid = (vBid + vAsk) / 2;
 
-        if (exposure >= this.MAX_POSITION_EXPOSURE) {
-          // state becomes closing only
-          if (p.baseAssetAmount.gt(new BN(0))) {
-            this.agentState.stateType.set(
-              p.marketIndex,
-              StateType.CLOSING_LONG
-            );
-          } else {
-            this.agentState.stateType.set(
-              p.marketIndex,
-              StateType.CLOSING_SHORT
-            );
-          }
+      const positionMax = this.levels[marketIndex].amount / mid;
+      const baseAmount = convertToNumber(p.baseAssetAmount, BASE_PRECISION);
+
+      let longNotional = Math.max(positionMax - baseAmount, 0);
+      let shortNotional = Math.max(positionMax + baseAmount, 0);
+
+      if (longNotional < 0.1 * positionMax) longNotional = 0;
+      if (shortNotional < 0.1 * positionMax) shortNotional = 0;
+
+      this.agentState.shortNotional.set(marketIndex, shortNotional);
+      this.agentState.longNotional.set(marketIndex, longNotional);
+
+      if (exposure >= this.MAX_POSITION_EXPOSURE) {
+        // state becomes closing only
+        if (p.baseAssetAmount.gt(new BN(0))) {
+          this.agentState.stateType.set(
+            p.marketIndex,
+            StateType.CLOSING_LONG
+          );
         } else {
-          // update state to be whatever our current position is
-          if (p.baseAssetAmount.gt(new BN(0))) {
-            this.agentState.stateType.set(p.marketIndex, StateType.LONG);
-          } else if (p.baseAssetAmount.lt(new BN(0))) {
-            this.agentState.stateType.set(p.marketIndex, StateType.SHORT);
-          } else {
-            this.agentState.stateType.set(p.marketIndex, StateType.NEUTRAL);
-          }
+          this.agentState.stateType.set(
+            p.marketIndex,
+            StateType.CLOSING_SHORT
+          );
+        }
+      } else {
+        // update state to be whatever our current position is
+        if (p.baseAssetAmount.gt(new BN(0))) {
+          this.agentState.stateType.set(p.marketIndex, StateType.LONG);
+        } else if (p.baseAssetAmount.lt(new BN(0))) {
+          this.agentState.stateType.set(p.marketIndex, StateType.SHORT);
+        } else {
+          this.agentState.stateType.set(p.marketIndex, StateType.NEUTRAL);
         }
       }
     }
@@ -668,6 +678,8 @@ export class FloatingPerpMakerBot implements Bot {
       return;
     }
 
+    const name = INDEX_TO_NAME[marketIndex];
+
     const openOrders = this.agentState.openOrders.get(marketIndex);
     const oracle = this.driftClient.getOracleDataForPerpMarket(marketIndex);
     const vAsk = calculateAskPrice(marketAccount, oracle);
@@ -676,47 +688,47 @@ export class FloatingPerpMakerBot implements Bot {
     const bestAsk = this.dlob.getBestAsk(marketIndex, vAsk, this.slotSubscriber.getSlot(), MarketType.PERP, oracle);
     const bestBid = this.dlob.getBestBid(marketIndex, vBid, this.slotSubscriber.getSlot(), MarketType.PERP, oracle);
 
-    console.log(`mkt: ${marketAccount.marketIndex} open orders:`);
-    for (const [idx, o] of openOrders.entries()) {
-      console.log(
-        `${Object.keys(o.orderType)[0]} ${Object.keys(o.direction)[0]}`
-      );
-      console.log(
-        `[${idx}]: baa: ${convertToNumber(
-          o.baseAssetAmountFilled,
-          BASE_PRECISION
-        )}/${convertToNumber(o.baseAssetAmount, BASE_PRECISION)}`
-      );
-      console.log(` .        qaa: ${o.quoteAssetAmount}`);
-      console.log(
-        ` .        price:       ${convertToNumber(o.price, PRICE_PRECISION)}`
-      );
-      console.log(
-        ` .        priceOffset: ${convertToNumber(
-          new BN(o.oraclePriceOffset),
-          PRICE_PRECISION
-        )}`
-      );
-      console.log(` .        vBid: ${convertToNumber(bestBid, PRICE_PRECISION)}`);
-      console.log(` .        vAsk: ${convertToNumber(bestAsk, PRICE_PRECISION)}`);
-      console.log(
-        ` .        oraclePrice: ${convertToNumber(
-          oracle.price,
-          PRICE_PRECISION
-        )}`
-      );
-      console.log(` .        oracleSlot:  ${oracle.slot.toString()}`);
-      console.log(` .        oracleConf:  ${oracle.confidence.toString()}`);
+    // cancel orders if not quoting both sides of the market
+    const isOpenTradeTimedOut = !this.lastPlaced[marketIndex] || this.lastPlaced[marketIndex] < new Date().getTime() - this.timeoutDelay * 1000;
+
+    let longAmountOpen = 0;
+    let shortAmountOpen = 0;
+    let longCountOpen = 0;
+    let shortCountOpen = 0;
+
+    const longNotional = this.agentState.longNotional.get(marketIndex);
+    const shortNotional = this.agentState.shortNotional.get(marketIndex);
+
+    const bestAskNumber = convertToNumber(bestAsk, PRICE_PRECISION);
+    const bestBidNumber = convertToNumber(bestBid, PRICE_PRECISION);
+
+    for (const o of openOrders) {
+      const baseAmount = Math.abs(convertToNumber(o.baseAssetAmount, BASE_PRECISION));
+      if ((isVariant(o.direction, 'long'))) {
+        longCountOpen += 1;
+        longAmountOpen = baseAmount;
+      } else {
+        shortCountOpen += 1;
+        shortAmountOpen = baseAmount;
+      }
+
+      console.log(`${o.direction} ${name} ${convertToNumber(new BN(oracle.price.toNumber() + o.oraclePriceOffset), PRICE_PRECISION)} ${isVariant(o.direction, 'long') ? bestAskNumber : bestBidNumber}`);
     }
 
-    // cancel orders if not quoting both sides of the market
-    let placeNewOrders = openOrders.length === 0;
-    const currentState = this.agentState.stateType.get(marketIndex);
+    let needCancel = false;
+    if (longCountOpen > 1 || shortCountOpen > 1) {
+      console.log(name, 'cancel due to too many open', longCountOpen, shortCountOpen);
+      needCancel = true;
+    } else if (Math.abs(longAmountOpen - longNotional) > 0.2 * longNotional) {
+      console.log(name, 'cancel due to delta in long notional', longAmountOpen, longNotional);
+      needCancel = true;
+    } else if (Math.abs(shortAmountOpen - shortNotional) > 0.2 * shortNotional) {
+      console.log(name, 'cancel due to delta in short notional', shortAmountOpen, shortNotional);
+      needCancel = true;
+    }
 
-    const isClosingOneDirection = currentState === StateType.CLOSING_SHORT || currentState === StateType.CLOSING_LONG;
-    const isOpenTradeTimedOut = !this.lastPlaced[marketIndex] || this.lastPlaced[marketIndex] < new Date().getTime() - this.timeoutDelay;
-
-    if (openOrders.length > 0 && (isOpenTradeTimedOut || this.needOrderUpdate[marketIndex] || (isClosingOneDirection && openOrders.length > 1) || (!isClosingOneDirection && openOrders.length !== 2))) {
+    if (openOrders.length > 0 && (needCancel || isOpenTradeTimedOut || this.needOrderUpdate[marketIndex])) {
+      logger.info(`${name} Reason for cancelling OpenOrder/Timeout/config change ${needCancel} ${isOpenTradeTimedOut} ${this.needOrderUpdate[marketIndex]}`);
       // cancel orders
       for (const o of openOrders) {
         this.driftClient.cancelOrder(o.orderId).then(tx => console.log(
@@ -725,12 +737,11 @@ export class FloatingPerpMakerBot implements Bot {
           .authority.toBase58()}-${o.orderId}: ${tx}`
         ));
       }
-      placeNewOrders = true;
     }
 
     this.needOrderUpdate[marketIndex] = false;
 
-    if (placeNewOrders) {
+    if (openOrders.length === 0) {
       // let biasNum = new BN(90);
       // let biasDenom = new BN(100);
 
@@ -754,14 +765,15 @@ export class FloatingPerpMakerBot implements Bot {
       const bidOffset = new BN((bidWanted - oraclePrice) * PRICE_PRECISION.toNumber()).toNumber();
       const askOffset = new BN((askWanted - oraclePrice) * PRICE_PRECISION.toNumber()).toNumber();
 
-      if (!this.RESTRICT_POSITION_SIZE || currentState !== StateType.CLOSING_LONG) {
+      if (longNotional && longNotional > 0) {
         const release = await this.longMutex[marketIndex].acquire();
         // const oracleBidSpread = oracle.price.sub(bestBid);
+        console.log(marketIndex, longNotional);
         this.driftClient.placePerpOrder({
           marketIndex: marketIndex,
           orderType: OrderType.LIMIT,
           direction: PositionDirection.LONG,
-          baseAssetAmount: new BN(BASE_PRECISION.toNumber() * this.levels[marketIndex].amount),
+          baseAssetAmount: new BN(BASE_PRECISION.toNumber() * longNotional),
           postOnly: PostOnlyParams.MUST_POST_ONLY,
           oraclePriceOffset: bidOffset, // limit bid below oracle,
         }).then(tx0 => console.log(`${this.name} placing long: ${tx0}`)).catch(
@@ -771,14 +783,15 @@ export class FloatingPerpMakerBot implements Bot {
         });
       }
 
-      if (!this.RESTRICT_POSITION_SIZE || currentState !== StateType.CLOSING_SHORT) {
+      if (shortNotional && shortNotional > 0) {
         // const oracleAskSpread = bestAsk.sub(oracle.price);
         const release = await this.shortMutex[marketIndex].acquire();
+        console.log(marketIndex, shortNotional);
         this.driftClient.placePerpOrder({
           marketIndex: marketIndex,
           orderType: OrderType.LIMIT,
           direction: PositionDirection.SHORT,
-          baseAssetAmount: new BN(BASE_PRECISION.toNumber() * this.levels[marketIndex].amount),
+          baseAssetAmount: new BN(BASE_PRECISION.toNumber() * shortNotional),
           postOnly: PostOnlyParams.MUST_POST_ONLY,
           oraclePriceOffset: askOffset, // limit ask above oracle
         }).then(tx1 => console.log(`${this.name} placing short: ${tx1}`)).catch(
