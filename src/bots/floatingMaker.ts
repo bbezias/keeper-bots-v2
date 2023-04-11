@@ -58,7 +58,7 @@ type State = {
 };
 
 type LevelParams = { [marketIndex: number]: { bid: number, ask: number, minSpread: number, amount: number } }
-type Config = { maxExposure: number, levels: LevelParams };
+type Config = { maxExposure: number, timeoutDelay: number, levels: LevelParams };
 
 const dlobMutexError = new Error('dlobMutex timeout');
 
@@ -138,6 +138,7 @@ export class FloatingPerpMakerBot implements Bot {
   private errorCounter: Counter;
   private tryMakeDurationHistogram: Histogram;
   private levels: LevelParams;
+  private timeoutDelay: number
   private lastPlaced: { [marketId: number]: number } = {};
   private needOrderUpdate: { [marketId: number]: boolean } = {};
 
@@ -186,6 +187,7 @@ export class FloatingPerpMakerBot implements Bot {
       if (err) throw err;
       const params: Config = JSON.parse(data.toString());
       this.levels = params.levels;
+      this.timeoutDelay = params.timeoutDelay;
       this.MAX_POSITION_EXPOSURE = params.maxExposure;
       console.log(this.levels);
     });
@@ -715,7 +717,7 @@ export class FloatingPerpMakerBot implements Bot {
     const currentState = this.agentState.stateType.get(marketIndex);
 
     const isClosingOneDirection = currentState === StateType.CLOSING_SHORT || currentState === StateType.CLOSING_LONG;
-    const isOpenTradeTimedOut = !this.lastPlaced[marketIndex] || this.lastPlaced[marketIndex] < new Date().getTime() - 60 * 1000 * 2;
+    const isOpenTradeTimedOut = !this.lastPlaced[marketIndex] || this.lastPlaced[marketIndex] < new Date().getTime() - this.timeoutDelay;
 
     if (openOrders.length > 0 && (isOpenTradeTimedOut || this.needOrderUpdate[marketIndex] || (isClosingOneDirection && openOrders.length > 1) || (!isClosingOneDirection && openOrders.length !== 2))) {
       // cancel orders
