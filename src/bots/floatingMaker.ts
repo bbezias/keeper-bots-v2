@@ -735,7 +735,7 @@ export class FloatingPerpMakerBot implements Bot {
           `${this.name} cancelling order ${this.driftClient
           .getUserAccount()
           .authority.toBase58()}-${o.orderId}: ${tx}`
-        ));
+        )).catch(e => logger.error(`Order cancel error ${e}`));
       }
     }
 
