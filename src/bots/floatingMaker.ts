@@ -377,21 +377,6 @@ export class FloatingPerpMakerBot implements Bot {
             ),
             labels
           );
-          batchObservableResult.observe(
-            this.unrealizedPnL,
-            convertToNumber(user.getUnrealizedPNL(), QUOTE_PRECISION),
-            labels
-          );
-          batchObservableResult.observe(
-            this.unrealizedFundingPnL,
-            convertToNumber(user.getUnrealizedFundingPNL(), QUOTE_PRECISION),
-            labels
-          );
-          batchObservableResult.observe(
-            this.unrealizedFundingPnL,
-            convertToNumber(user.getUnrealizedFundingPNL(), QUOTE_PRECISION),
-            labels
-          );
 
           batchObservableResult.observe(
             this.maxExposureGauge,
@@ -421,6 +406,18 @@ export class FloatingPerpMakerBot implements Bot {
             batchObservableResult.observe(
               this.perpPositionQuote,
               convertToNumber(perpPosition.quoteAssetAmount, QUOTE_PRECISION),
+              labelWithMarket
+            );
+
+            batchObservableResult.observe(
+              this.unrealizedPnL,
+              convertToNumber(user.getUnrealizedPNL(false, marketIndex), QUOTE_PRECISION),
+              labelWithMarket
+            );
+
+            batchObservableResult.observe(
+              this.unrealizedFundingPnL,
+              convertToNumber(user.getUnrealizedFundingPNL(marketIndex), QUOTE_PRECISION),
               labelWithMarket
             );
 
