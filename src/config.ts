@@ -41,11 +41,28 @@ export type FloatingMakerConfig = BaseBotConfig & {
 	}
 };
 
+export type HedgingConfig = BaseBotConfig & {
+	marketEnabled: {
+		sol: boolean,
+		btc: boolean
+		eth: boolean,
+		apt: boolean,
+		bonk: boolean,
+		matic: boolean,
+		arb: boolean,
+		doge: boolean
+	},
+	mangoKey: string,
+	defaultIntervalMs: number,
+	timeWindowMinutes: number
+};
+
 
 export type BotConfigMap = {
 	filler?: FillerConfig;
 	spotFiller?: FillerConfig;
 	trigger?: BaseBotConfig;
+	hedging?: HedgingConfig;
 	liquidator?: LiquidatorConfig;
 	floatingMaker?: FloatingMakerConfig;
 	jitMaker?: BaseBotConfig;
@@ -242,6 +259,18 @@ export function loadConfigFromOpts(opts: any): Config {
 			botId: process.env.BOT_ID ?? 'floatingMaker',
 			metricsPort: 9469,
 			marketEnabled: opts.marketEnabled ?? {sol: true, btc: false, eth: false, apt: false, matic: false, bonk: false, arb: false, doge: false},
+		};
+	}
+	if (opts.hedging) {
+		config.enabledBots.push('hedging');
+		config.botConfigs.hedging = {
+			dryRun: opts.dryRun ?? false,
+			botId: process.env.BOT_ID ?? 'hedging',
+			metricsPort: 9470,
+			marketEnabled: opts.marketEnabled ?? {sol: true, btc: false, eth: false, apt: false, matic: false, bonk: false, arb: false, doge: false},
+			mangoKey: '',
+			defaultIntervalMs: 30000,
+			timeWindowMinutes: 60
 		};
 	}
 	if (opts.ifRevenueSettler) {

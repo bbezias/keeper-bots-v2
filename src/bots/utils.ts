@@ -35,6 +35,12 @@ export enum KUCOIN_CONTRACTS {
   arb = 'ARBUSDTM',
 }
 
+export const INDEX_TO_MANGO = {
+  0: 2,
+  1: 0,
+  2: 3
+};
+
 export const INDEX_TO_NAME = {
   0: 'Solana',
   1: 'Bitcoin',

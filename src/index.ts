@@ -55,6 +55,7 @@ import {
   loadConfigFromFile,
   loadConfigFromOpts,
 } from './config';
+import { HedgingBot } from './bots/hedging';
 
 require('dotenv').config();
 const commitHash = process.env.COMMIT;
@@ -589,6 +590,22 @@ const runBot = async () => {
       )
     );
   }
+  if (configHasBot(config, 'hedging')) {
+    bots.push(
+      new HedgingBot(
+        driftClient,
+        slotSubscriber,
+        {
+          rpcEndpoint: endpoint,
+          commit: commitHash,
+          driftEnv: config.global.driftEnv,
+          driftPid: driftPublicKey.toBase58(),
+          walletAuthority: wallet.publicKey.toBase58(),
+        },
+        config.botConfigs.hedging
+      )
+    );
+  }
 
   if (configHasBot(config, 'userPnlSettler')) {
     bots.push(
@@ -708,6 +725,27 @@ const runBot = async () => {
           // do something with the JSON data here
           res.writeHead(200);
           res.end('Config updated');
+        } catch (err) {
+          res.writeHead(400);
+          res.end('Invalid JSON format');
+        }
+      });
+    } else if (req.url === '/change-config-hedge' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => {
+        body += chunk.toString();
+      });
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          for (const bot of bots) {
+            if (bot.name === "hedging") {
+              (bot as HedgingBot).updateParams(data);
+            }
+          }
+          // do something with the JSON data here
+          res.writeHead(200);
+          res.end('Config for hedge bot updated');
         } catch (err) {
           res.writeHead(400);
           res.end('Invalid JSON format');

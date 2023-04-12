@@ -85,6 +85,7 @@ enum METRIC_TYPES {
   perp_position_base = 'perp_position_base',
   perp_position_quote = 'perp_position_quote',
   total_leverage = 'total_leverage',
+  total_asset_value = 'total_asset_value'
 }
 
 /**
@@ -129,6 +130,7 @@ export class FloatingPerpMakerBot implements Bot {
   private maintenanceMarginRequirement: ObservableGauge;
   private totalLeverage: ObservableGauge;
   private perpPositionValue: ObservableGauge;
+  private totalAssetValueGauge: ObservableGauge;
   private perpPositionBase: ObservableGauge;
   private perpPositionQuote: ObservableGauge;
   private unrealizedPnL: ObservableGauge;
@@ -322,6 +324,12 @@ export class FloatingPerpMakerBot implements Bot {
         description: 'Base asset value of account perp positions',
       }
     );
+    this.totalAssetValueGauge = this.meter.createObservableGauge(
+      METRIC_TYPES.total_asset_value,
+      {
+        description: 'Total Asset Value',
+      }
+    );
     this.perpPositionQuote = this.meter.createObservableGauge(
       METRIC_TYPES.perp_position_quote,
       {
@@ -360,6 +368,15 @@ export class FloatingPerpMakerBot implements Bot {
           batchObservableResult.observe(
             this.freeCollateral,
             convertToNumber(user.getFreeCollateral(), QUOTE_PRECISION),
+            labels
+          );
+
+          batchObservableResult.observe(
+            this.totalAssetValueGauge,
+            convertToNumber(
+              user.getTotalAssetValue(),
+              QUOTE_PRECISION
+            ),
             labels
           );
 
@@ -461,7 +478,8 @@ export class FloatingPerpMakerBot implements Bot {
         this.unrealizedPnL,
         this.unrealizedFundingPnL,
         this.levelGauge,
-        this.maxExposureGauge
+        this.maxExposureGauge,
+        this.totalAssetValueGauge
       ]
     );
 
