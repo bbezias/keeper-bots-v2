@@ -28,12 +28,43 @@ export type LiquidatorConfig = BaseBotConfig & {
 	spotSubAccountConfig?: SubaccountConfig;
 };
 
+export type FloatingMakerConfig = BaseBotConfig & {
+	marketEnabled: {
+		sol: boolean,
+		btc: boolean
+		eth: boolean,
+		apt: boolean,
+		bonk: boolean,
+		matic: boolean,
+		arb: boolean,
+		doge: boolean
+	}
+};
+
+export type HedgingConfig = BaseBotConfig & {
+	marketEnabled: {
+		sol: boolean,
+		btc: boolean
+		eth: boolean,
+		apt: boolean,
+		bonk: boolean,
+		matic: boolean,
+		arb: boolean,
+		doge: boolean
+	},
+	mangoKey: string,
+	defaultIntervalMs: number,
+	timeWindowMinutes: number
+};
+
+
 export type BotConfigMap = {
 	filler?: FillerConfig;
 	spotFiller?: FillerConfig;
 	trigger?: BaseBotConfig;
+	hedging?: HedgingConfig;
 	liquidator?: LiquidatorConfig;
-	floatingMaker?: BaseBotConfig;
+	floatingMaker?: FloatingMakerConfig;
 	jitMaker?: BaseBotConfig;
 	ifRevenueSettler?: BaseBotConfig;
 	fundingRateUpdater?: BaseBotConfig;
@@ -222,6 +253,27 @@ export function loadConfigFromOpts(opts: any): Config {
 			runOnce: opts.runOnce ?? false,
 		};
 	}
+	if (opts.floatingMaker) {
+		config.enabledBots.push('floatingMaker');
+		config.botConfigs.floatingMaker = {
+			dryRun: opts.dryRun ?? false,
+			botId: process.env.BOT_ID ?? 'floatingMaker',
+			metricsPort: 9469,
+			marketEnabled: opts.marketEnabled ?? {sol: true, btc: false, eth: false, apt: false, matic: false, bonk: false, arb: false, doge: false},
+		};
+	}
+	if (opts.hedging) {
+		config.enabledBots.push('hedging');
+		config.botConfigs.hedging = {
+			dryRun: opts.dryRun ?? false,
+			botId: process.env.BOT_ID ?? 'hedging',
+			metricsPort: 9470,
+			marketEnabled: opts.marketEnabled ?? {sol: true, btc: false, eth: false, apt: false, matic: false, bonk: false, arb: false, doge: false},
+			mangoKey: '',
+			defaultIntervalMs: 30000,
+			timeWindowMinutes: 60
+		};
+	}
 	if (opts.ifRevenueSettler) {
 		config.enabledBots.push('ifRevenueSettler');
 		config.botConfigs.ifRevenueSettler = {
@@ -236,15 +288,6 @@ export function loadConfigFromOpts(opts: any): Config {
 		config.botConfigs.userPnlSettler = {
 			dryRun: opts.dryRun ?? false,
 			botId: process.env.BOT_ID ?? 'userPnlSettler',
-			metricsPort: 9464,
-			runOnce: opts.runOnce ?? false,
-		};
-	}
-	if (opts.fundingRateUpdater) {
-		config.enabledBots.push('fundingRateUpdater');
-		config.botConfigs.fundingRateUpdater = {
-			dryRun: opts.dryRun ?? false,
-			botId: process.env.BOT_ID ?? 'fundingRateUpdater',
 			metricsPort: 9464,
 			runOnce: opts.runOnce ?? false,
 		};
